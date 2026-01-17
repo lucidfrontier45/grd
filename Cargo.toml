@@ -17,6 +17,11 @@ clap = { version = "4.5.54", features = ["derive"] }
 flate2 = "1.1.8"
 reqwest = { version = "0.13.1", features = ["json", "blocking"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
 tar = "0.4.44"
 zip = "7.1.0"
+
+[profile.release]
+lto = true
+opt-level = "s"
+codegen-units = 1
+strip = "symbols"
