@@ -68,7 +68,7 @@ enum DownloadSource {
 fn main() -> Result<()> {
     let args = Args::parse();
     let client = Client::builder()
-        .user_agent("rust-downloader-cli")
+        .user_agent(format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     // If the --list flag is present
