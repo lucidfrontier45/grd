@@ -9,40 +9,57 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          # Windows x86_64 GNU
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            use-cross: true
+          # Windows aarch64 GNU (gnullvm)
+          - target: aarch64-pc-windows-gnullvm
+            os: ubuntu-latest
+            use-cross: true
+          # Linux x86_64 musl
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+          # Linux aarch64 musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use-cross: false
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Cross-compile binary
-        uses: houseabsolute/actions-rust-cross@v1
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          command: build
-          args: --release --target ${{ matrix.target }}
-          target: ${{ matrix.target }}
+          targets: ${{ matrix.target }}
 
-      - name: Prepare binary for upload
+      - name: Install Cross
+        if: matrix.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      - name: Build
         run: |
-          # Determine binary name and path
-          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
-            BINARY_NAME="grd-${{ matrix.target }}.exe"
-            BINARY_PATH="target/${{ matrix.target }}/release/grd.exe"
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
           else
-            BINARY_NAME="grd-${{ matrix.target }}"
-            BINARY_PATH="target/${{ matrix.target }}/release/grd"
+            cargo build --release --target ${{ matrix.target }}
           fi
-          # Copy to a consistent location for upload
-          mkdir -p artifacts
-          cp "$BINARY_PATH" "artifacts/$BINARY_NAME"
-          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
 
-      - name: Upload to release
-        run: gh release upload ${{ github.event.release.tag_name }} artifacts/$BINARY_NAME
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/${{ github.event.repository.name }}
+            target/${{ matrix.target }}/release/${{ github.event.repository.name }}.exe
