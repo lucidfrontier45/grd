@@ -1,13 +1,12 @@
 use std::{
     env, fs,
-    io::{self, Cursor, Write},
+    io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use flate2::read::GzDecoder;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
@@ -67,17 +66,16 @@ enum DownloadSource {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let client = Client::builder()
-        .user_agent(format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let agent = ureq::Agent::new_with_defaults();
+    let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
 
     // If the --list flag is present
     if args.list {
-        return list_releases(&client, &args.repo);
+        return list_releases(&agent, &ua, &args.repo);
     }
 
     // 1. Fetch release info (specific tag or latest)
-    let release = fetch_release_info(&client, &args.repo, args.tag.as_deref())?;
+    let release = fetch_release_info(&agent, &ua, &args.repo, args.tag.as_deref())?;
     println!("Selected version: {}", release.tag_name);
 
     // 2. Select the asset best matching the host
@@ -98,13 +96,20 @@ fn main() -> Result<()> {
     let source = if asset.size > memory_threshold {
         println!("Using temp file due to size > {} bytes", memory_threshold);
         let mut temp_file = NamedTempFile::new()?;
-        let mut response = client.get(&asset.browser_download_url).send()?;
-        response.copy_to(&mut temp_file)?;
+        let mut response = agent
+            .get(&asset.browser_download_url)
+            .header("User-Agent", &ua)
+            .call()?;
+        let mut reader = response.body_mut().as_reader();
+        io::copy(&mut reader, &mut temp_file)?;
         DownloadSource::Disk(temp_file)
     } else {
-        let response = client.get(&asset.browser_download_url).send()?;
-        let bytes = response.bytes()?;
-        DownloadSource::Memory(bytes.to_vec())
+        let mut response = ureq::get(&asset.browser_download_url)
+            .header("User-Agent", &ua)
+            .call()?;
+        let mut bytes = vec![];
+        response.body_mut().as_reader().read_to_end(&mut bytes)?;
+        DownloadSource::Memory(bytes)
     };
 
     extract_and_save(source, &asset.name, &bin_name, &args.destination)?;
@@ -117,9 +122,10 @@ fn main() -> Result<()> {
 }
 
 /// List releases
-fn list_releases(client: &Client, repo: &str) -> Result<()> {
+fn list_releases(agent: &ureq::Agent, ua: &str, repo: &str) -> Result<()> {
     let url = format!("https://api.github.com/repos/{}/releases", repo);
-    let releases: Vec<Release> = client.get(url).send()?.json()?;
+    let mut response = agent.get(&url).header("User-Agent", ua).call()?;
+    let releases: Vec<Release> = response.body_mut().read_json()?;
 
     println!("Available releases for {}:", repo);
     for rel in releases {
@@ -129,20 +135,25 @@ fn list_releases(client: &Client, repo: &str) -> Result<()> {
 }
 
 /// Fetch release information for a given tag or the latest release
-fn fetch_release_info(client: &Client, repo: &str, tag: Option<&str>) -> Result<Release> {
+fn fetch_release_info(
+    agent: &ureq::Agent,
+    ua: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<Release> {
     let url = match tag {
         Some(t) => format!("https://api.github.com/repos/{}/releases/tags/{}", repo, t),
         None => format!("https://api.github.com/repos/{}/releases/latest", repo),
     };
 
-    let response = client.get(&url).send()?;
+    let mut response = agent.get(&url).header("User-Agent", ua).call()?;
     if !response.status().is_success() {
         return Err(anyhow!(
             "Failed to fetch release info: {}",
             response.status()
         ));
     }
-    Ok(response.json()?)
+    Ok(response.body_mut().read_json()?)
 }
 
 fn format_size(bytes: u64) -> String {

@@ -15,10 +15,10 @@ readme = "README.md"
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
 flate2 = "1.1.8"
-reqwest = { version = "0.13.1", features = ["json", "blocking"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4.44"
 tempfile = "3.24"
+ureq = { version = "3.1.4", features = ["rustls", "json"] }
 zip = "7.1.0"
 
 [profile.release]
