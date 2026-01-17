@@ -1,6 +1,7 @@
 use std::{
-    env, fs,
-    io::{self, Cursor, Read, Write},
+    env,
+    fs::{self, File},
+    io::{self, Cursor, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -64,6 +65,9 @@ enum DownloadSource {
     Memory(Vec<u8>),
     Disk(NamedTempFile),
 }
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -252,35 +256,21 @@ fn extract_and_save(
 }
 
 fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
-    match source {
-        DownloadSource::Memory(bytes) => {
-            let mut archive = ZipArchive::new(Cursor::new(bytes))?;
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
-                if file.name().ends_with(target_bin_name) {
-                    let out_path = dest_dir.join(target_bin_name);
-                    let mut outfile = fs::File::create(&out_path)?;
-                    io::copy(&mut file, &mut outfile)?;
-                    #[cfg(unix)]
-                    set_permissions(&out_path)?;
-                    return Ok(());
-                }
-            }
-        }
-        DownloadSource::Disk(temp_file) => {
-            let file = fs::File::open(temp_file.path())?;
-            let mut archive = ZipArchive::new(file)?;
-            for i in 0..archive.len() {
-                let mut file = archive.by_index(i)?;
-                if file.name().ends_with(target_bin_name) {
-                    let out_path = dest_dir.join(target_bin_name);
-                    let mut outfile = fs::File::create(&out_path)?;
-                    io::copy(&mut file, &mut outfile)?;
-                    #[cfg(unix)]
-                    set_permissions(&out_path)?;
-                    return Ok(());
-                }
-            }
+    let rdr: Box<dyn ReadSeek> = match source {
+        DownloadSource::Memory(bytes) => Box::new(Cursor::new(bytes)),
+        DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
+    };
+    let target_bin_name: &str = target_bin_name;
+    let mut archive = ZipArchive::new(rdr)?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        if file.name().ends_with(target_bin_name) {
+            let out_path = dest_dir.join(target_bin_name);
+            let mut outfile = File::create(&out_path)?;
+            io::copy(&mut file, &mut outfile)?;
+            #[cfg(unix)]
+            set_permissions(&out_path)?;
+            return Ok(());
         }
     }
     Err(anyhow!(
@@ -290,37 +280,21 @@ fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -
 }
 
 fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
-    match source {
-        DownloadSource::Memory(bytes) => {
-            let tar_gz = GzDecoder::new(Cursor::new(bytes));
-            let mut archive = tar::Archive::new(tar_gz);
-            for entry in archive.entries()? {
-                let mut file = entry?;
-                let path = file.path()?.to_path_buf();
-                if path.to_string_lossy().ends_with(target_bin_name) {
-                    let out_path = dest_dir.join(target_bin_name);
-                    file.unpack(&out_path)?;
-                    #[cfg(unix)]
-                    set_permissions(&out_path)?;
-                    return Ok(());
-                }
-            }
-        }
-        DownloadSource::Disk(temp_file) => {
-            let file = fs::File::open(temp_file.path())?;
-            let tar_gz = GzDecoder::new(file);
-            let mut archive = tar::Archive::new(tar_gz);
-            for entry in archive.entries()? {
-                let mut file = entry?;
-                let path = file.path()?.to_path_buf();
-                if path.to_string_lossy().ends_with(target_bin_name) {
-                    let out_path = dest_dir.join(target_bin_name);
-                    file.unpack(&out_path)?;
-                    #[cfg(unix)]
-                    set_permissions(&out_path)?;
-                    return Ok(());
-                }
-            }
+    let rdr: Box<dyn Read> = match source {
+        DownloadSource::Memory(bytes) => Box::new(Cursor::new(bytes)),
+        DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
+    };
+    let target_bin_name: &str = target_bin_name;
+    let mut archive = tar::Archive::new(GzDecoder::new(rdr));
+    for entry in archive.entries()? {
+        let mut file = entry?;
+        let path = file.path()?.to_path_buf();
+        if path.to_string_lossy().ends_with(target_bin_name) {
+            let out_path = dest_dir.join(target_bin_name);
+            file.unpack(&out_path)?;
+            #[cfg(unix)]
+            set_permissions(&out_path)?;
+            return Ok(());
         }
     }
     Err(anyhow!(
