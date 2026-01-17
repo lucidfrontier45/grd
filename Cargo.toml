@@ -1,0 +1,22 @@
+[package]
+name = "grd"
+version = "0.1.0"
+edition = "2024"
+authors = ["杜世橋 Du Shiqiao <lucidfrontier.45@gmail.com>"]
+description = "A command-line tool to download and install binaries from GitHub releases."
+license = "MIT"
+repository = "https://github.com/lucidfrontier45/grd"
+homepage = "https://github.com/lucidfrontier45/grd"
+keywords = ["cli", "github", "downloader", "releases", "binary"]
+categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.54", features = ["derive"] }
+flate2 = "1.1.8"
+reqwest = { version = "0.13.1", features = ["json", "blocking"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tar = "0.4.44"
+zip = "7.1.0"
