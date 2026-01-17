@@ -91,26 +91,7 @@ fn main() -> Result<()> {
             .to_string()
     });
 
-    let memory_threshold = args.memory_limit;
-    println!("Downloading...");
-    let source = if asset.size > memory_threshold {
-        println!("Using temp file due to size > {} bytes", memory_threshold);
-        let mut temp_file = NamedTempFile::new()?;
-        let mut response = agent
-            .get(&asset.browser_download_url)
-            .header("User-Agent", &ua)
-            .call()?;
-        let mut reader = response.body_mut().as_reader();
-        io::copy(&mut reader, &mut temp_file)?;
-        DownloadSource::Disk(temp_file)
-    } else {
-        let mut response = ureq::get(&asset.browser_download_url)
-            .header("User-Agent", &ua)
-            .call()?;
-        let mut bytes = vec![];
-        response.body_mut().as_reader().read_to_end(&mut bytes)?;
-        DownloadSource::Memory(bytes)
-    };
+    let source = download_asset(&agent, &ua, &asset, args.memory_limit)?;
 
     extract_and_save(source, &asset.name, &bin_name, &args.destination)?;
 
@@ -232,6 +213,35 @@ fn select_asset(assets: &[Asset], first: bool, exclude: Option<&str>) -> Result<
             }
         }
     }
+}
+
+fn download_asset(
+    agent: &ureq::Agent,
+    ua: &str,
+    asset: &Asset,
+    memory_threshold: u64,
+) -> Result<DownloadSource> {
+    println!("Downloading...");
+    let source = if asset.size > memory_threshold {
+        println!("Using temp file due to size > {} bytes", memory_threshold);
+        let mut temp_file = NamedTempFile::new()?;
+        let mut response = agent
+            .get(&asset.browser_download_url)
+            .header("User-Agent", ua)
+            .call()?;
+        let mut reader = response.body_mut().as_reader();
+        io::copy(&mut reader, &mut temp_file)?;
+        DownloadSource::Disk(temp_file)
+    } else {
+        let mut response = agent
+            .get(&asset.browser_download_url)
+            .header("User-Agent", ua)
+            .call()?;
+        let mut bytes = vec![];
+        response.body_mut().as_reader().read_to_end(&mut bytes)?;
+        DownloadSource::Memory(bytes)
+    };
+    Ok(source)
 }
 
 fn extract_and_save(
