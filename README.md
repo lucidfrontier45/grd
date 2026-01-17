@@ -1,8 +1,8 @@
-# grd
+<img src="./logo.png" width="500" alt="Logo">
 
 GitHub Release Downloader
 
-A command-line tool to download and install binaries from GitHub releases. Downloads large files to temporary storage to avoid high memory usage.
+A command-line tool to download and install binaries from GitHub releases.
 
 ## Installation
 
