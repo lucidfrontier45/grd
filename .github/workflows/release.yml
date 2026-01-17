@@ -1,0 +1,81 @@
+name: Release Build
+
+on:
+  release:
+    types: [published] # Triggered when a release is published
+
+permissions:
+  contents: write # Required to upload assets to the release
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x86_64 GNU
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            use-cross: true
+            suffix: .exe
+          # Linux x86_64 musl
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            suffix: ""
+          # Linux aarch64 musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+            suffix: ""
+          # macOS aarch64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use-cross: false
+            suffix: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Cross
+        if: matrix.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      - name: Build project
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Prepare binary for upload
+        shell: bash
+        run: |
+          # Use the repository name as the binary name
+          REPO_NAME="${{ github.event.repository.name }}"
+          TARGET="${{ matrix.target }}"
+          SUFFIX="${{ matrix.suffix }}"
+
+          # Define source path and new output filename
+          SOURCE="target/$TARGET/release/$REPO_NAME$SUFFIX"
+          OUTPUT="$REPO_NAME-$TARGET$SUFFIX"
+
+          # Rename binary to include target architecture
+          cp "$SOURCE" "$OUTPUT"
+          echo "ASSET_PATH=$OUTPUT" >> $GITHUB_ENV
+
+      - name: Upload binary to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_PATH }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
