@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use flate2::read::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use ureq::Agent;
@@ -217,20 +218,49 @@ fn select_asset(assets: &[Asset], first: bool, exclude: Option<&str>) -> Result<
 
 fn download_asset(agent: &Agent, asset: &Asset, memory_threshold: u64) -> Result<DownloadSource> {
     println!("Downloading...");
+    let pb = ProgressBar::new(asset.size);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
+    let mut response = agent.get(&asset.browser_download_url).call()?;
+    let mut reader = response.body_mut().as_reader();
     let source = if asset.size > memory_threshold {
         println!("Using temp file due to size > {} bytes", memory_threshold);
         let mut temp_file = NamedTempFile::new()?;
-        let mut response = agent.get(&asset.browser_download_url).call()?;
-        let mut reader = response.body_mut().as_reader();
-        io::copy(&mut reader, &mut temp_file)?;
+        let writer = |buf: &[u8]| temp_file.write_all(buf);
+        download_with_progress(&mut reader, &pb, writer)?;
         DownloadSource::Disk(temp_file)
     } else {
-        let mut response = agent.get(&asset.browser_download_url).call()?;
-        let mut bytes = vec![];
-        response.body_mut().as_reader().read_to_end(&mut bytes)?;
+        let mut bytes = Vec::new();
+        let writer = |buf: &[u8]| {
+            bytes.extend_from_slice(buf);
+            Ok(())
+        };
+        download_with_progress(&mut reader, &pb, writer)?;
         DownloadSource::Memory(bytes)
     };
+    pb.finish_with_message("Downloaded");
     Ok(source)
+}
+
+fn download_with_progress<R: Read, F>(reader: &mut R, pb: &ProgressBar, mut writer: F) -> Result<()>
+where
+    F: FnMut(&[u8]) -> io::Result<()>,
+{
+    let mut buf = [0; 8192];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        writer(&buf[..n])?;
+        pb.inc(n as u64);
+    }
+    Ok(())
 }
 
 fn extract_and_save(
