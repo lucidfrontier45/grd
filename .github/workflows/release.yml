@@ -1,0 +1,50 @@
+name: Release Builds
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cross-compile binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+          target: ${{ matrix.target }}
+
+      - name: Prepare binary for upload
+        run: |
+          # Determine binary name and path
+          if [[ "${{ matrix.target }}" == *-windows-* ]]; then
+            BINARY_NAME="grd-${{ matrix.target }}.exe"
+            BINARY_PATH="target/${{ matrix.target }}/release/grd.exe"
+          else
+            BINARY_NAME="grd-${{ matrix.target }}"
+            BINARY_PATH="target/${{ matrix.target }}/release/grd"
+          fi
+          # Copy to a consistent location for upload
+          mkdir -p artifacts
+          cp "$BINARY_PATH" "artifacts/$BINARY_NAME"
+          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
+
+      - name: Upload to release
+        run: gh release upload ${{ github.event.release.tag_name }} artifacts/$BINARY_NAME
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
