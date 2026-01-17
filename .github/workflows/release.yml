@@ -17,7 +17,6 @@ jobs:
           - aarch64-pc-windows-msvc
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
-          - aarch64-apple-darwin
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
