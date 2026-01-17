@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use clap::Parser;
 use flate2::read::GzDecoder;
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use tempfile::NamedTempFile;
 use ureq::Agent;
@@ -217,19 +218,45 @@ fn select_asset(assets: &[Asset], first: bool, exclude: Option<&str>) -> Result<
 
 fn download_asset(agent: &Agent, asset: &Asset, memory_threshold: u64) -> Result<DownloadSource> {
     println!("Downloading...");
+    let pb = ProgressBar::new(asset.size);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-"),
+    );
     let source = if asset.size > memory_threshold {
         println!("Using temp file due to size > {} bytes", memory_threshold);
         let mut temp_file = NamedTempFile::new()?;
         let mut response = agent.get(&asset.browser_download_url).call()?;
         let mut reader = response.body_mut().as_reader();
-        io::copy(&mut reader, &mut temp_file)?;
+        let mut buf = [0; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            temp_file.write_all(&buf[..n])?;
+            pb.inc(n as u64);
+        }
         DownloadSource::Disk(temp_file)
     } else {
         let mut response = agent.get(&asset.browser_download_url).call()?;
-        let mut bytes = vec![];
-        response.body_mut().as_reader().read_to_end(&mut bytes)?;
+        let mut bytes = Vec::new();
+        let mut reader = response.body_mut().as_reader();
+        let mut buf = [0; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..n]);
+            pb.inc(n as u64);
+        }
         DownloadSource::Memory(bytes)
     };
+    pb.finish_with_message("Downloaded");
     Ok(source)
 }
 
