@@ -237,89 +237,105 @@ fn extract_and_save(
     };
 
     if filename.ends_with(".zip") {
-        match source {
-            DownloadSource::Memory(bytes) => {
-                let mut archive = ZipArchive::new(Cursor::new(bytes))?;
-                for i in 0..archive.len() {
-                    let mut file = archive.by_index(i)?;
-                    if file.name().ends_with(&target_bin_name) {
-                        let out_path = dest_dir.join(&target_bin_name);
-                        let mut outfile = fs::File::create(&out_path)?;
-                        io::copy(&mut file, &mut outfile)?;
-                        #[cfg(unix)]
-                        set_permissions(&out_path)?;
-                        return Ok(());
-                    }
-                }
-            }
-            DownloadSource::Disk(temp_file) => {
-                let file = fs::File::open(temp_file.path())?;
-                let mut archive = ZipArchive::new(file)?;
-                for i in 0..archive.len() {
-                    let mut file = archive.by_index(i)?;
-                    if file.name().ends_with(&target_bin_name) {
-                        let out_path = dest_dir.join(&target_bin_name);
-                        let mut outfile = fs::File::create(&out_path)?;
-                        io::copy(&mut file, &mut outfile)?;
-                        #[cfg(unix)]
-                        set_permissions(&out_path)?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        extract_zip(source, &target_bin_name, dest_dir)
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        match source {
-            DownloadSource::Memory(bytes) => {
-                let tar_gz = GzDecoder::new(Cursor::new(bytes));
-                let mut archive = tar::Archive::new(tar_gz);
-                for entry in archive.entries()? {
-                    let mut file = entry?;
-                    let path = file.path()?.to_path_buf();
-                    if path.to_string_lossy().ends_with(&target_bin_name) {
-                        let out_path = dest_dir.join(&target_bin_name);
-                        file.unpack(&out_path)?;
-                        #[cfg(unix)]
-                        set_permissions(&out_path)?;
-                        return Ok(());
-                    }
-                }
-            }
-            DownloadSource::Disk(temp_file) => {
-                let file = fs::File::open(temp_file.path())?;
-                let tar_gz = GzDecoder::new(file);
-                let mut archive = tar::Archive::new(tar_gz);
-                for entry in archive.entries()? {
-                    let mut file = entry?;
-                    let path = file.path()?.to_path_buf();
-                    if path.to_string_lossy().ends_with(&target_bin_name) {
-                        let out_path = dest_dir.join(&target_bin_name);
-                        file.unpack(&out_path)?;
-                        #[cfg(unix)]
-                        set_permissions(&out_path)?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
+        extract_tar_gz(source, &target_bin_name, dest_dir)
     } else {
-        let out_path = dest_dir.join(&target_bin_name);
-        match source {
-            DownloadSource::Memory(bytes) => {
-                fs::write(&out_path, bytes)?;
-            }
-            DownloadSource::Disk(temp_file) => {
-                fs::copy(temp_file.path(), &out_path)?;
+        save_raw(source, &target_bin_name, dest_dir)
+    }
+}
+
+fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+    match source {
+        DownloadSource::Memory(bytes) => {
+            let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if file.name().ends_with(target_bin_name) {
+                    let out_path = dest_dir.join(target_bin_name);
+                    let mut outfile = fs::File::create(&out_path)?;
+                    io::copy(&mut file, &mut outfile)?;
+                    #[cfg(unix)]
+                    set_permissions(&out_path)?;
+                    return Ok(());
+                }
             }
         }
-        #[cfg(unix)]
-        set_permissions(&out_path)?;
-        return Ok(());
+        DownloadSource::Disk(temp_file) => {
+            let file = fs::File::open(temp_file.path())?;
+            let mut archive = ZipArchive::new(file)?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if file.name().ends_with(target_bin_name) {
+                    let out_path = dest_dir.join(target_bin_name);
+                    let mut outfile = fs::File::create(&out_path)?;
+                    io::copy(&mut file, &mut outfile)?;
+                    #[cfg(unix)]
+                    set_permissions(&out_path)?;
+                    return Ok(());
+                }
+            }
+        }
     }
     Err(anyhow!(
         "Executable '{}' not found in archive",
         target_bin_name
     ))
+}
+
+fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+    match source {
+        DownloadSource::Memory(bytes) => {
+            let tar_gz = GzDecoder::new(Cursor::new(bytes));
+            let mut archive = tar::Archive::new(tar_gz);
+            for entry in archive.entries()? {
+                let mut file = entry?;
+                let path = file.path()?.to_path_buf();
+                if path.to_string_lossy().ends_with(target_bin_name) {
+                    let out_path = dest_dir.join(target_bin_name);
+                    file.unpack(&out_path)?;
+                    #[cfg(unix)]
+                    set_permissions(&out_path)?;
+                    return Ok(());
+                }
+            }
+        }
+        DownloadSource::Disk(temp_file) => {
+            let file = fs::File::open(temp_file.path())?;
+            let tar_gz = GzDecoder::new(file);
+            let mut archive = tar::Archive::new(tar_gz);
+            for entry in archive.entries()? {
+                let mut file = entry?;
+                let path = file.path()?.to_path_buf();
+                if path.to_string_lossy().ends_with(target_bin_name) {
+                    let out_path = dest_dir.join(target_bin_name);
+                    file.unpack(&out_path)?;
+                    #[cfg(unix)]
+                    set_permissions(&out_path)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(anyhow!(
+        "Executable '{}' not found in archive",
+        target_bin_name
+    ))
+}
+
+fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+    let out_path = dest_dir.join(target_bin_name);
+    match source {
+        DownloadSource::Memory(bytes) => {
+            fs::write(&out_path, bytes)?;
+        }
+        DownloadSource::Disk(temp_file) => {
+            fs::copy(temp_file.path(), &out_path)?;
+        }
+    }
+    #[cfg(unix)]
+    set_permissions(&out_path)?;
+    Ok(())
 }
 
 #[cfg(unix)]
