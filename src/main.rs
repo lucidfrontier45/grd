@@ -9,6 +9,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
 #[derive(Parser, Debug)]
@@ -40,6 +41,10 @@ struct Args {
     /// Comma-separated list of words to exclude from asset matching
     #[arg(long)]
     exclude: Option<String>,
+
+    /// Memory limit in bytes; downloads larger than this use temp files
+    #[arg(short = 'm', long = "memory-limit", default_value = "104857600")]
+    memory_limit: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -53,6 +58,11 @@ struct Asset {
     name: String,
     browser_download_url: String,
     size: u64,
+}
+
+enum DownloadSource {
+    Memory(Vec<u8>),
+    Disk(NamedTempFile),
 }
 
 fn main() -> Result<()> {
@@ -83,11 +93,21 @@ fn main() -> Result<()> {
             .to_string()
     });
 
+    let memory_threshold = args.memory_limit;
     println!("Downloading...");
-    let response = client.get(&asset.browser_download_url).send()?;
-    let bytes = response.bytes()?;
+    let source = if asset.size > memory_threshold {
+        println!("Using temp file due to size > {} bytes", memory_threshold);
+        let mut temp_file = NamedTempFile::new()?;
+        let mut response = client.get(&asset.browser_download_url).send()?;
+        response.copy_to(&mut temp_file)?;
+        DownloadSource::Disk(temp_file)
+    } else {
+        let response = client.get(&asset.browser_download_url).send()?;
+        let bytes = response.bytes()?;
+        DownloadSource::Memory(bytes.to_vec())
+    };
 
-    extract_and_save(&bytes, &asset.name, &bin_name, &args.destination)?;
+    extract_and_save(source, &asset.name, &bin_name, &args.destination)?;
 
     println!(
         "Successfully installed '{}' to {:?}",
@@ -203,7 +223,12 @@ fn select_asset(assets: &[Asset], first: bool, exclude: Option<&str>) -> Result<
     }
 }
 
-fn extract_and_save(data: &[u8], filename: &str, bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn extract_and_save(
+    source: DownloadSource,
+    filename: &str,
+    bin_name: &str,
+    dest_dir: &Path,
+) -> Result<()> {
     fs::create_dir_all(dest_dir)?;
     let target_bin_name = if cfg!(windows) {
         format!("{}.exe", bin_name)
@@ -212,35 +237,81 @@ fn extract_and_save(data: &[u8], filename: &str, bin_name: &str, dest_dir: &Path
     };
 
     if filename.ends_with(".zip") {
-        let mut archive = ZipArchive::new(Cursor::new(data))?;
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            if file.name().ends_with(&target_bin_name) {
-                let out_path = dest_dir.join(&target_bin_name);
-                let mut outfile = fs::File::create(&out_path)?;
-                io::copy(&mut file, &mut outfile)?;
-                #[cfg(unix)]
-                set_permissions(&out_path)?;
-                return Ok(());
+        match source {
+            DownloadSource::Memory(bytes) => {
+                let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i)?;
+                    if file.name().ends_with(&target_bin_name) {
+                        let out_path = dest_dir.join(&target_bin_name);
+                        let mut outfile = fs::File::create(&out_path)?;
+                        io::copy(&mut file, &mut outfile)?;
+                        #[cfg(unix)]
+                        set_permissions(&out_path)?;
+                        return Ok(());
+                    }
+                }
+            }
+            DownloadSource::Disk(temp_file) => {
+                let file = fs::File::open(temp_file.path())?;
+                let mut archive = ZipArchive::new(file)?;
+                for i in 0..archive.len() {
+                    let mut file = archive.by_index(i)?;
+                    if file.name().ends_with(&target_bin_name) {
+                        let out_path = dest_dir.join(&target_bin_name);
+                        let mut outfile = fs::File::create(&out_path)?;
+                        io::copy(&mut file, &mut outfile)?;
+                        #[cfg(unix)]
+                        set_permissions(&out_path)?;
+                        return Ok(());
+                    }
+                }
             }
         }
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        let tar_gz = GzDecoder::new(Cursor::new(data));
-        let mut archive = tar::Archive::new(tar_gz);
-        for entry in archive.entries()? {
-            let mut file = entry?;
-            let path = file.path()?.to_path_buf();
-            if path.to_string_lossy().ends_with(&target_bin_name) {
-                let out_path = dest_dir.join(&target_bin_name);
-                file.unpack(&out_path)?;
-                #[cfg(unix)]
-                set_permissions(&out_path)?;
-                return Ok(());
+        match source {
+            DownloadSource::Memory(bytes) => {
+                let tar_gz = GzDecoder::new(Cursor::new(bytes));
+                let mut archive = tar::Archive::new(tar_gz);
+                for entry in archive.entries()? {
+                    let mut file = entry?;
+                    let path = file.path()?.to_path_buf();
+                    if path.to_string_lossy().ends_with(&target_bin_name) {
+                        let out_path = dest_dir.join(&target_bin_name);
+                        file.unpack(&out_path)?;
+                        #[cfg(unix)]
+                        set_permissions(&out_path)?;
+                        return Ok(());
+                    }
+                }
+            }
+            DownloadSource::Disk(temp_file) => {
+                let file = fs::File::open(temp_file.path())?;
+                let tar_gz = GzDecoder::new(file);
+                let mut archive = tar::Archive::new(tar_gz);
+                for entry in archive.entries()? {
+                    let mut file = entry?;
+                    let path = file.path()?.to_path_buf();
+                    if path.to_string_lossy().ends_with(&target_bin_name) {
+                        let out_path = dest_dir.join(&target_bin_name);
+                        file.unpack(&out_path)?;
+                        #[cfg(unix)]
+                        set_permissions(&out_path)?;
+                        return Ok(());
+                    }
+                }
             }
         }
     } else {
         let out_path = dest_dir.join(&target_bin_name);
-        fs::write(&out_path, data)?;
+        match source {
+            DownloadSource::Memory(bytes) => {
+                fs::write(&out_path, bytes)?;
+            }
+            DownloadSource::Disk(temp_file) => {
+                fs::copy(temp_file.path(), &out_path)?;
+            }
+        }
         #[cfg(unix)]
         set_permissions(&out_path)?;
         return Ok(());
