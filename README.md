@@ -2,7 +2,7 @@
 
 GitHub Release Downloader
 
-A command-line tool to download and install binaries from GitHub releases.
+A command-line tool to download and install binaries from GitHub releases. Downloads large files to temporary storage to avoid high memory usage.
 
 ## Installation
 
@@ -24,7 +24,7 @@ cargo install --path .
 
 ### Prebuilt binaries
 
-Download from [releases](https://github.com/yourusername/grd/releases).
+Download from [releases](https://github.com/lucidfrontier45/grd/releases).
 
 ## Usage
 
@@ -52,6 +52,18 @@ Specify destination directory:
 grd owner/repo --destination /usr/local/bin
 ```
 
+Set a custom memory limit (e.g., 50MB):
+
+```bash
+grd owner/repo --memory-limit 52428800
+```
+
+## Memory Usage
+
+- Downloads smaller than the memory limit are loaded entirely into RAM for processing.
+- Larger downloads use temporary files to avoid excessive memory consumption.
+- The default limit is 100MB, but can be adjusted with `--memory-limit`.
+
 ## Options
 
 - `repo`: GitHub repository (owner/repo)
@@ -61,11 +73,12 @@ grd owner/repo --destination /usr/local/bin
 - `--bin-name`: Override executable name
 - `--first`: Select first matching asset without prompting
 - `--exclude`: Comma-separated words to exclude from asset matching
+- `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
 
 ## Building
 
 ```bash
-cargo build
-cargo test
 cargo clippy
+cargo test
+cargo build --release
 ```
