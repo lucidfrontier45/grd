@@ -44,6 +44,10 @@ struct Args {
     #[arg(long)]
     exclude: Option<String>,
 
+    /// Save downloaded file without decompressing/extracting it
+    #[arg(long = "no-decompress")]
+    no_decompress: bool,
+
     /// Memory limit in bytes; downloads larger than this use temp files
     #[arg(short = 'm', long = "memory-limit", default_value = "104857600")]
     memory_limit: u64,
@@ -99,7 +103,13 @@ fn main() -> Result<()> {
 
     let source = download_asset(&agent, &asset, args.memory_limit)?;
 
-    extract_and_save(source, &asset.name, &bin_name, &args.destination)?;
+    extract_and_save(
+        source,
+        &asset.name,
+        &bin_name,
+        &args.destination,
+        args.no_decompress,
+    )?;
 
     println!(
         "Successfully installed '{}' to {:?}",
@@ -224,7 +234,7 @@ fn download_asset(agent: &Agent, asset: &Asset, memory_threshold: u64) -> Result
             "[{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})",
         )
         .unwrap()
-        .progress_chars("#>-"),
+        .progress_chars("#>–"),
     );
     let mut response = agent.get(&asset.browser_download_url).call()?;
     let mut reader = response.body_mut().as_reader();
@@ -268,8 +278,17 @@ fn extract_and_save(
     filename: &str,
     bin_name: &str,
     dest_dir: &Path,
+    no_decompress: bool,
 ) -> Result<()> {
     fs::create_dir_all(dest_dir)?;
+
+    if no_decompress {
+        // Save using the original asset name (do not rename or extract)
+        save_raw(source, filename, dest_dir)?;
+        println!("Saved raw asset to {:?}", dest_dir.join(filename));
+        return Ok(());
+    }
+
     let target_bin_name = if cfg!(windows) {
         format!("{}.exe", bin_name)
     } else {
