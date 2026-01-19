@@ -18,7 +18,7 @@ use zip::ZipArchive;
 #[command(author, version, about = "GitHub Release Downloader")]
 struct Args {
     /// GitHub repository (e.g., owner/repo)
-    repo: String,
+    repo: Option<String>,
 
     /// Version to download (e.g., v1.2.3). If omitted, uses latest
     #[arg(short, long)]
@@ -51,6 +51,18 @@ struct Args {
     /// Memory limit in bytes; downloads larger than this use temp files
     #[arg(short = 'm', long = "memory-limit", default_value = "104857600")]
     memory_limit: u64,
+
+    /// Target OS (windows, macos, linux, auto-detect if omitted)
+    #[arg(long)]
+    os: Option<String>,
+
+    /// Target architecture (x86_64, aarch64, auto-detect if omitted)
+    #[arg(long)]
+    arch: Option<String>,
+
+    /// List supported platform combinations
+    #[arg(long)]
+    list_platforms: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -76,30 +88,58 @@ impl<T: Read + Seek + ?Sized> ReadSeek for T {}
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
     let agent: Agent = Agent::config_builder().user_agent(&ua).build().into();
 
     // If the --list flag is present
     if args.list {
-        return list_releases(&agent, &args.repo);
+        let repo = args
+            .repo
+            .as_ref()
+            .ok_or_else(|| anyhow!("--list requires a repository"))?;
+        return list_releases(&agent, repo);
     }
 
+    let repo = args.repo.ok_or_else(|| anyhow!("Repository is required"))?;
+
     // 1. Fetch release info (specific tag or latest)
-    let release = fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;
+    let release = fetch_release_info(&agent, &repo, args.tag.as_deref())?;
     println!("Selected version: {}", release.tag_name);
 
-    // 2. Select the asset best matching the host
-    let asset = select_asset(&release.assets, args.first, args.exclude.as_deref())?;
+    // 2. Select the asset best matching the host or explicit platform
+    let os = args
+        .os
+        .as_ref()
+        .map(|s| normalize_os(s))
+        .transpose()?
+        .unwrap_or_else(|| env::consts::OS.to_string());
+    let arch = args
+        .arch
+        .as_ref()
+        .map(|s| normalize_arch(s))
+        .transpose()?
+        .unwrap_or_else(|| env::consts::ARCH.to_string());
+
+    if args.os.is_none() && args.arch.is_none() {
+        println!("Detected platform: {}-{}", os, arch);
+    } else {
+        println!("Using platform: {}-{}", os, arch);
+    }
+
+    let asset = select_asset(
+        &release.assets,
+        &os,
+        &arch,
+        args.first,
+        args.exclude.as_deref(),
+    )?;
     println!("Selected asset: {}", asset.name);
 
     // 3. Download and place the binary
-    let bin_name = args.bin_name.unwrap_or_else(|| {
-        args.repo
-            .split('/')
-            .next_back()
-            .unwrap_or("app")
-            .to_string()
-    });
+    let bin_name = args
+        .bin_name
+        .unwrap_or_else(|| repo.split('/').next_back().unwrap_or("app").to_string());
 
     let source = download_asset(&agent, &asset, args.memory_limit)?;
 
@@ -158,10 +198,36 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn select_asset(assets: &[Asset], first: bool, exclude: Option<&str>) -> Result<Asset> {
-    let os = env::consts::OS;
-    let arch = env::consts::ARCH;
+fn normalize_os(input: &str) -> Result<String> {
+    let normalized = input.to_lowercase();
+    match normalized.as_str() {
+        "windows" | "macos" | "linux" => Ok(normalized),
+        _ => Err(anyhow!(
+            "Invalid OS '{}'. Supported: windows, macos, linux",
+            input
+        )),
+    }
+}
 
+fn normalize_arch(input: &str) -> Result<String> {
+    let normalized = input.to_lowercase();
+    match normalized.as_str() {
+        "x86_64" | "amd64" | "x64" => Ok("x86_64".to_string()),
+        "aarch64" | "arm64" => Ok("aarch64".to_string()),
+        _ => Err(anyhow!(
+            "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64)",
+            input
+        )),
+    }
+}
+
+fn select_asset(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    first: bool,
+    exclude: Option<&str>,
+) -> Result<Asset> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
