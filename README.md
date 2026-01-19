@@ -58,6 +58,22 @@ Set a custom memory limit (e.g., 50MB):
 grd owner/repo --memory-limit 52428800
 ```
 
+
+Download for a specific platform (explicit OS/arch):
+
+```bash
+grd owner/repo --os linux --arch aarch64 # arm64 is also accepted
+grd owner/repo --os windows --arch x86_64 # amd64 and x64 are also accepted
+```
+
+Download without decompressing/extracting:
+
+```bash
+grd owner/repo --no-decompress
+```
+
+
+
 ## Memory Usage
 
 - Downloads smaller than the memory limit are loaded entirely into RAM for processing.
@@ -75,6 +91,8 @@ grd owner/repo --memory-limit 52428800
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
+- `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
+- `--arch`: Target architecture (x86_64, aarch64, amd64, x64, arm64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64.
 
 ## Building
 
