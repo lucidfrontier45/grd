@@ -27,7 +27,7 @@ pub fn normalize_arch(input: &str) -> Result<String> {
     }
 }
 
-pub fn format_size(bytes: u64) -> String {
+fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)
     } else if bytes < 1024 * 1024 {

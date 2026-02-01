@@ -40,7 +40,7 @@ pub fn extract_and_save(
     }
 }
 
-pub fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
     let rdr: Box<dyn ReadSeek> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -63,11 +63,7 @@ pub fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Pat
     ))
 }
 
-pub fn extract_tar_gz(
-    source: DownloadSource,
-    target_bin_name: &str,
-    dest_dir: &Path,
-) -> Result<()> {
+fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
     let rdr: Box<dyn Read> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -91,7 +87,7 @@ pub fn extract_tar_gz(
     ))
 }
 
-pub fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
     let out_path = dest_dir.join(target_bin_name);
     match source {
         DownloadSource::Memory(bytes) => {
