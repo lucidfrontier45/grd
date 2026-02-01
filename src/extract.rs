@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use zip::ZipArchive;
 
@@ -57,10 +57,7 @@ fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -
             return Ok(());
         }
     }
-    Err(anyhow::anyhow!(
-        "Executable '{}' not found in archive",
-        target_bin_name
-    ))
+    bail!("Executable '{}' not found in archive", target_bin_name)
 }
 
 fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
@@ -81,10 +78,7 @@ fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
             return Ok(());
         }
     }
-    Err(anyhow::anyhow!(
-        "Executable '{}' not found in archive",
-        target_bin_name
-    ))
+    bail!("Executable '{}' not found in archive", target_bin_name)
 }
 
 fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {

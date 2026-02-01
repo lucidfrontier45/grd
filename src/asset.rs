@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::github::Asset;
 
@@ -8,10 +8,7 @@ pub fn normalize_os(input: &str) -> Result<String> {
     let normalized = input.to_lowercase();
     match normalized.as_str() {
         "windows" | "macos" | "linux" => Ok(normalized),
-        _ => Err(anyhow::anyhow!(
-            "Invalid OS '{}'. Supported: windows, macos, linux",
-            input
-        )),
+        _ => bail!("Invalid OS '{}'. Supported: windows, macos, linux", input),
     }
 }
 
@@ -20,10 +17,10 @@ pub fn normalize_arch(input: &str) -> Result<String> {
     match normalized.as_str() {
         "x86_64" | "amd64" | "x64" => Ok("x86_64".to_string()),
         "aarch64" | "arm64" => Ok("aarch64".to_string()),
-        _ => Err(anyhow::anyhow!(
+        _ => bail!(
             "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64)",
             input
-        )),
+        ),
     }
 }
 
@@ -78,11 +75,7 @@ pub fn select_asset(
         .collect();
 
     match matches.len() {
-        0 => Err(anyhow::anyhow!(
-            "No matching asset found for {}-{}",
-            os,
-            arch
-        )),
+        0 => bail!("No matching asset found for {}-{}", os, arch),
         1 => Ok(matches[0].clone()),
         _ => {
             if first {

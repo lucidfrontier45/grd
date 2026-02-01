@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use ureq::Agent;
 
@@ -45,10 +45,7 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
     })?;
 
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Failed to fetch release info: HTTP {}",
-            response.status()
-        ));
+        bail!("Failed to fetch release info: HTTP {}", response.status())
     }
 
     response
