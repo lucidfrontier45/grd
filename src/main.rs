@@ -2,14 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use clap::Parser;
-
-mod asset;
-mod cli;
-mod download;
-mod extract;
-mod github;
-
-use crate::cli::Args;
+use grd::{asset, cli::Args, download, extract, github};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -29,7 +22,11 @@ fn main() -> Result<()> {
     let agent: ureq::Agent = ureq::Agent::config_builder().user_agent(&ua).build().into();
 
     if args.list {
-        return github::list_releases(&agent, &args.repo);
+        let releases = github::list_releases(&agent, &args.repo)?;
+        println!("Available releases for {}:", &args.repo);
+        for rel in releases {
+            println!("  - {}", rel.tag_name);
+        }
     }
 
     let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;

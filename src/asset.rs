@@ -104,3 +104,176 @@ pub fn select_asset(
         }
     }
 }
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_os_valid() {
+        assert_eq!(normalize_os("windows").unwrap(), "windows");
+        assert_eq!(normalize_os("WINDOWS").unwrap(), "windows");
+        assert_eq!(normalize_os("macos").unwrap(), "macos");
+        assert_eq!(normalize_os("MACOS").unwrap(), "macos");
+        assert_eq!(normalize_os("linux").unwrap(), "linux");
+        assert_eq!(normalize_os("LINUX").unwrap(), "linux");
+    }
+
+    #[test]
+    fn test_normalize_os_invalid() {
+        assert!(normalize_os("freebsd").is_err());
+        assert!(normalize_os("android").is_err());
+        assert!(normalize_os("invalid").is_err());
+    }
+
+    #[test]
+    fn test_normalize_arch_valid() {
+        assert_eq!(normalize_arch("x86_64").unwrap(), "x86_64");
+        assert_eq!(normalize_arch("amd64").unwrap(), "x86_64");
+        assert_eq!(normalize_arch("AMD64").unwrap(), "x86_64");
+        assert_eq!(normalize_arch("x64").unwrap(), "x86_64");
+        assert_eq!(normalize_arch("X64").unwrap(), "x86_64");
+        assert_eq!(normalize_arch("aarch64").unwrap(), "aarch64");
+        assert_eq!(normalize_arch("arm64").unwrap(), "aarch64");
+        assert_eq!(normalize_arch("ARM64").unwrap(), "aarch64");
+    }
+
+    #[test]
+    fn test_normalize_arch_invalid() {
+        assert!(normalize_arch("i386").is_err());
+        assert!(normalize_arch("x86").is_err());
+        assert!(normalize_arch("armv7").is_err());
+        assert!(normalize_arch("invalid").is_err());
+    }
+
+    #[test]
+    fn test_format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn test_format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+        assert_eq!(format_size(1024 * 1023), "1023.0 KB");
+    }
+
+    #[test]
+    fn test_format_size_megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(1024 * 1024 * 10), "10.0 MB");
+    }
+
+    #[test]
+    fn test_select_asset_single_match() {
+        let assets = vec![Asset {
+            name: "app-x86_64-linux.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-x86_64-linux.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_multiple_matches_with_first() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux.zip".to_string(),
+                browser_download_url: "https://example.com/app2.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "linux", "x86_64", true, None).unwrap();
+        assert_eq!(result.name, "app-x86_64-linux.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_with_exclude() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux-musl.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux-gnu.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "linux", "x86_64", true, Some("musl")).unwrap();
+        assert_eq!(result.name, "app-x86_64-linux-gnu.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_no_match() {
+        let assets = vec![Asset {
+            name: "app-x86_64-windows.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
+            size: 1024,
+        }];
+
+        assert!(select_asset(&assets, "linux", "x86_64", false, None).is_err());
+    }
+
+    #[test]
+    fn test_select_asset_windows_patterns() {
+        let assets = vec![
+            Asset {
+                name: "app-windows-x86_64.exe".to_string(),
+                browser_download_url: "https://example.com/app.exe".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-pc-windows-msvc.zip".to_string(),
+                browser_download_url: "https://example.com/app.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "windows", "x86_64", false, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_select_asset_macos_patterns() {
+        let assets = vec![
+            Asset {
+                name: "app-darwin-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-apple-darwin-aarch64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-arm.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "macos", "aarch64", false, None).unwrap();
+        assert_eq!(result.name, "app-apple-darwin-aarch64.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_linux_patterns() {
+        let assets = vec![Asset {
+            name: "app-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "linux", "x86_64", false, None);
+        assert!(result.is_ok());
+    }
+}

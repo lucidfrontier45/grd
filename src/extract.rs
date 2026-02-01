@@ -107,3 +107,123 @@ fn set_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, perms)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_readseek_trait() {
+        let data = vec![1, 2, 3, 4, 5];
+        let cursor = Cursor::new(data);
+        let _: Box<dyn ReadSeek> = Box::new(cursor);
+    }
+
+    #[test]
+    fn test_save_raw_memory() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+        let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
+
+        let result = save_raw(source, "test.bin", dest_dir);
+        assert!(result.is_ok());
+
+        let file_path = dest_dir.join("test.bin");
+        assert!(file_path.exists());
+
+        let content = fs::read(file_path).unwrap();
+        assert_eq!(content, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_save_raw_disk() {
+        use tempfile::NamedTempFile;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(b"test content").unwrap();
+        let source = DownloadSource::Disk(temp_file);
+
+        let result = save_raw(source, "test.bin", dest_dir);
+        assert!(result.is_ok());
+
+        let file_path = dest_dir.join("test.bin");
+        assert!(file_path.exists());
+
+        let content = fs::read(file_path).unwrap();
+        assert_eq!(content, b"test content");
+    }
+
+    #[test]
+    fn test_extract_and_save_no_decompress() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+        let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
+
+        let result = extract_and_save(source, "test.bin", "app", dest_dir, true);
+        assert!(result.is_ok());
+
+        let file_path = dest_dir.join("test.bin");
+        assert!(file_path.exists());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_target_bin_name_windows() {
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+        let source = DownloadSource::Memory(vec![]);
+
+        let result = extract_and_save(source, "test.bin", "app", dest_dir, false);
+        assert!(result.is_ok());
+
+        let file_path = dest_dir.join("app.exe");
+        assert!(file_path.exists());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn test_target_bin_name_unix() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+        let source = DownloadSource::Memory(vec![]);
+
+        let result = extract_and_save(source, "test.bin", "app", dest_dir, false);
+        assert!(result.is_ok());
+
+        let file_path = dest_dir.join("app");
+        assert!(file_path.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_set_permissions() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.bin");
+        fs::write(&file_path, b"test").unwrap();
+
+        let result = set_permissions(&file_path);
+        assert!(result.is_ok());
+
+        let perms = fs::metadata(&file_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(perms.mode(), 0o755);
+        }
+    }
+}
