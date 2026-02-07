@@ -1,10 +1,11 @@
-use anyhow::{bail, Result};
 use std::env;
-use ureq::http::{header::HeaderValue, Request, Response};
-use ureq::middleware::Middleware;
-use ureq::middleware::MiddlewareNext;
-use ureq::Agent;
-use ureq::{Body, SendBody};
+
+use anyhow::{Result, bail};
+use ureq::{
+    Agent, Body, SendBody,
+    http::{Request, Response, header::HeaderValue},
+    middleware::{Middleware, MiddlewareNext},
+};
 
 fn load_pat_from_env() -> Option<String> {
     env::var("GITHUB_PAT")
@@ -105,8 +106,9 @@ impl Middleware for AuthMiddleware {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{Arc, Mutex};
+
+    use super::*;
 
     #[test]
     fn test_token_set_in_http_request() {

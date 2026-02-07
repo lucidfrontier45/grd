@@ -1,7 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use ureq::Agent;
-use ureq::Error as UreqError;
+use ureq::{Agent, Error as UreqError};
 
 fn is_unauthorized(status: u16) -> bool {
     status == 401
