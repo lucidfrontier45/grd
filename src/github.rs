@@ -85,6 +85,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires GitHub API access (may be rate limited)"]
     fn test_fetch_release_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
         let agent = Agent::config_builder().user_agent(&ua).build().into();
@@ -98,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires GitHub API access (may be rate limited)"]
     fn test_list_releases_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
         let agent = Agent::config_builder().user_agent(&ua).build().into();
