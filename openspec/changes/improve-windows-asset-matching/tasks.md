@@ -22,6 +22,8 @@
 - [x] 4.1 Update asset matching logic to use `normalize_platform_identifier()`
 - [x] 4.2 Ensure architecture inference is applied when available
 - [x] 4.3 Maintain backward compatibility with existing exact-match behavior
+- [x] 4.4 Add darwin exclusion logic to prevent false Windows matches
+- [x] 4.5 Run all existing tests to ensure no regressions
 
 ## 5. Testing
 
@@ -31,6 +33,9 @@
 - [x] 5.4 Add unit tests for `win` and `windows` without architecture inference
 - [x] 5.5 Add integration tests for asset matching with Windows platform variants
 - [x] 5.6 Add edge case tests (unknown identifiers, empty strings)
+- [x] 5.7 Add tests to verify darwin assets are NOT matched to Windows
+- [x] 5.8 Verify all existing unit tests pass after implementing darwin exclusion
+- [x] 5.9 Run `cargo test` and ensure 100% test pass rate
 
 ## 6. Documentation
 

@@ -19,6 +19,17 @@ The system SHALL normalize platform identifier aliases to canonical OS names bef
 - **WHEN** an asset is tagged with platform identifier `windows`
 - **THEN** the system SHALL match it to `OS=windows`
 
+### Requirement: Platform-specific exclusions
+The system SHALL NOT match assets to incorrect operating systems based on substring matches.
+
+#### Scenario: Darwin assets excluded from Windows matching
+- **WHEN** an asset name contains "darwin" (e.g., "apple-darwin", "x86_64-darwin")
+- **THEN** the system SHALL NOT match it to `OS=windows`
+
+#### Scenario: Darwin assets excluded from win alias matching
+- **WHEN** an asset name contains "darwin" and the platform identifier is `win`
+- **THEN** the system SHALL NOT match it to `OS=windows`
+
 ### Requirement: Case-insensitive platform matching
 The system SHALL perform case-insensitive matching for all platform identifiers.
 

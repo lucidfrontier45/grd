@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::github::Asset;
 
@@ -112,13 +112,15 @@ pub fn select_asset(
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
+
             let os_match = match normalized_os.as_str() {
                 "windows" => {
-                    name.contains("windows")
+                    (name.contains("windows")
                         || name.contains("win64")
                         || name.contains("pc-windows")
                         || name.contains("win32")
-                        || name.contains("win")
+                        || name.contains("win"))
+                        && !name.contains("darwin")
                 }
                 "macos" => {
                     name.contains("apple-darwin")
@@ -520,5 +522,83 @@ mod unit_tests {
     fn test_infer_architecture_from_platform_unknown_platform() {
         let arch = infer_architecture_from_platform("freebsd");
         assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_select_asset_darwin_not_matched_to_windows() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-apple-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-darwin.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-aarch64-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-arm-darwin.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "windows", "x86_64", false, None);
+        assert!(result.is_err(), "darwin assets should NOT match Windows");
+    }
+
+    #[test]
+    fn test_select_asset_darwin_with_win_alias_not_matched() {
+        let assets = vec![Asset {
+            name: "app-x86_64-darwin.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "darwin assets should NOT match even with 'win' alias"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_mixed_darwin_and_windows() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-darwin.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-windows.zip".to_string(),
+                browser_download_url: "https://example.com/app-windows.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "windows", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-x86_64-windows.zip");
+        assert!(!result.name.contains("darwin"));
+    }
+
+    #[test]
+    fn test_select_asset_darwin_exclusion_with_win32() {
+        let assets = vec![Asset {
+            name: "app-x86_64-apple-darwin.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win32", "x86_64", false, None);
+        assert!(result.is_err(), "darwin assets should NOT match win32");
+    }
+
+    #[test]
+    fn test_select_asset_darwin_exclusion_with_win64() {
+        let assets = vec![Asset {
+            name: "app-x86_64-darwin.exe".to_string(),
+            browser_download_url: "https://example.com/app.exe".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win64", "x86_64", false, None);
+        assert!(result.is_err(), "darwin assets should NOT match win64");
     }
 }

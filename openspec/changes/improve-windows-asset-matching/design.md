@@ -12,11 +12,13 @@ The existing platform detection code uses string-based matching without normaliz
 - Ensure case-insensitive matching for all platform identifiers
 - Maintain backward compatibility with existing asset tags
 - Add comprehensive test coverage for Windows platform variants
+- Prevent false positive matches from substring collisions (e.g., darwin assets matching Windows patterns)
 
 **Non-Goals:**
 - Platform alias support for non-Windows platforms (future scope)
 - Dynamic architecture inference from arbitrary strings
 - Breaking changes to existing API or data structures
+- Cross-platform substring conflicts (addressed via explicit exclusion logic)
 
 ## Decisions
 
@@ -76,6 +78,9 @@ The existing platform detection code uses string-based matching without normaliz
 
 **Risk**: Breaking existing asset tags that rely on exact case matching
 → **Mitigation**: Change is additive - all existing exact matches continue to work. New aliases are additional match paths.
+
+**Risk**: False positives from substring matching (e.g., "darwin" contains "win")
+→ **Mitigation**: Add explicit exclusion logic to prevent darwin assets from matching Windows patterns. The Windows matching logic checks for darwin-specific substrings and excludes those assets.
 
 **Trade-off**: Limited to Windows platform aliases in this change
 → **Justification**: Windows is the most problematic case based on issue reports. Other platforms can be added incrementally.
