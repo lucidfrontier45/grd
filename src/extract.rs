@@ -113,7 +113,6 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::io::Write;
-    use tempfile::TempDir;
 
     #[test]
     fn test_readseek_trait() {
@@ -180,6 +179,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_target_bin_name_windows() {
+        use tempfile::TempDir;
         let temp_dir = TempDir::new().unwrap();
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
@@ -223,7 +223,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(perms.mode(), 0o755);
+            assert_eq!(perms.mode() & 0o777, 0o755);
         }
     }
 }

@@ -9,6 +9,7 @@ use crate::{
 };
 
 #[test]
+#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_select_asset_from_real_repo() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
     let agent = Agent::config_builder().user_agent(&ua).build().into();
@@ -25,6 +26,7 @@ fn test_select_asset_from_real_repo() {
 }
 
 #[test]
+#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_integration_download_extract_save() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
     let agent = Agent::config_builder().user_agent(&ua).build().into();
