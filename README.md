@@ -26,6 +26,14 @@ cargo install --path .
 
 Download from [releases](https://github.com/lucidfrontier45/grd/releases).
 
+### Docker
+
+Use `grd` inside another Docker container.
+
+```Dockerfile
+COPY --from=ghcr.io/lucidfrontier45/grd:latest /bin/grd /bin/grd
+```
+
 ## Usage
 
 Download the latest release of a repository:
