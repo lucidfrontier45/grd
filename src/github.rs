@@ -1,6 +1,14 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use ureq::Agent;
+use ureq::{Agent, Error as UreqError};
+
+fn is_unauthorized(status: u16) -> bool {
+    status == 401
+}
+
+fn is_rate_limited(status: u16) -> bool {
+    status == 403
+}
 
 #[derive(Deserialize, Debug)]
 pub struct Release {
@@ -17,7 +25,24 @@ pub struct Asset {
 
 pub fn list_releases(agent: &Agent, repo: &str) -> Result<Vec<Release>> {
     let url = format!("https://api.github.com/repos/{}/releases", repo);
-    let mut response = agent.get(&url).call().context("Failed to list releases")?;
+    let mut response = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(UreqError::StatusCode(status_code)) => {
+            if is_unauthorized(status_code) {
+                bail!(
+                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                );
+            }
+            if is_rate_limited(status_code) {
+                bail!(
+                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                );
+            }
+            bail!("Failed to list releases for {}: HTTP {}", repo, status_code);
+        }
+        Err(e) => return Err(e).context("Failed to list releases"),
+    };
+
     response
         .body_mut()
         .read_json()
@@ -30,17 +55,36 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
         None => format!("https://api.github.com/repos/{}/releases/latest", repo),
     };
 
-    let mut response = agent.get(&url).call().with_context(|| {
-        format!(
-            "Failed to fetch release info for {}/{}",
-            repo,
-            tag.unwrap_or("latest")
-        )
-    })?;
-
-    if !response.status().is_success() {
-        bail!("Failed to fetch release info: HTTP {}", response.status())
-    }
+    let mut response = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(UreqError::StatusCode(status_code)) => {
+            if is_unauthorized(status_code) {
+                bail!(
+                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                );
+            }
+            if is_rate_limited(status_code) {
+                bail!(
+                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                );
+            }
+            bail!(
+                "Failed to fetch release info for {}/{}: HTTP {}",
+                repo,
+                tag.unwrap_or("latest"),
+                status_code
+            );
+        }
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to fetch release info for {}/{}",
+                    repo,
+                    tag.unwrap_or("latest")
+                )
+            });
+        }
+    };
 
     response
         .body_mut()
@@ -51,6 +95,7 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{configure_agent, get_auth_token};
 
     #[test]
     fn test_asset_size_display() {
@@ -85,10 +130,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires GitHub API access (may be rate limited)"]
     fn test_fetch_release_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-        let agent = Agent::config_builder().user_agent(&ua).build().into();
+        let token = get_auth_token();
+        let agent = configure_agent(&ua, token.as_deref());
 
         let result = fetch_release_info(&agent, "lucidfrontier45/grd", None);
         assert!(result.is_ok());
@@ -99,10 +144,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires GitHub API access (may be rate limited)"]
     fn test_list_releases_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-        let agent = Agent::config_builder().user_agent(&ua).build().into();
+        let token = get_auth_token();
+        let agent = configure_agent(&ua, token.as_deref());
 
         let result = list_releases(&agent, "lucidfrontier45/grd");
         assert!(result.is_ok());

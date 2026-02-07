@@ -1,20 +1,22 @@
 use std::env;
 
 use tempfile::TempDir;
-use ureq::Agent;
 
 use crate::{
-    asset::select_asset, download::download_asset, extract::extract_and_save,
+    asset::select_asset,
+    config::{configure_agent, get_auth_token},
+    download::download_asset,
+    extract::extract_and_save,
     github::fetch_release_info,
 };
 
 #[test]
-#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_select_asset_from_real_repo() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent = Agent::config_builder().user_agent(&ua).build().into();
+    let token = get_auth_token();
+    let agent = configure_agent(&ua, token.as_deref());
 
-    let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("14.1.0")).unwrap();
+    let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
@@ -26,18 +28,19 @@ fn test_select_asset_from_real_repo() {
 }
 
 #[test]
-#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_integration_download_extract_save() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent = Agent::config_builder().user_agent(&ua).build().into();
+    let token = get_auth_token();
+    let agent = configure_agent(&ua, token.as_deref());
 
-    let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("14.1.0")).unwrap();
+    let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
     let asset = select_asset(&release.assets, os, arch, true, None).unwrap();
     let memory_limit = 10 * 1024 * 1024;
 
+    dbg!(&asset);
     let source = download_asset(&agent, &asset, memory_limit).unwrap();
 
     let temp_dir = TempDir::new().unwrap();
