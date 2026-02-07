@@ -1,18 +1,16 @@
 use std::env;
 
 use tempfile::TempDir;
-use ureq::Agent;
 
 use crate::{
-    asset::select_asset, download::download_asset, extract::extract_and_save,
+    asset::select_asset, config, download::download_asset, extract::extract_and_save,
     github::fetch_release_info,
 };
 
 #[test]
-#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_select_asset_from_real_repo() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent = Agent::config_builder().user_agent(&ua).build().into();
+    let agent = config::configure_agent(&ua);
 
     let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("14.1.0")).unwrap();
     let os = env::consts::OS;
@@ -26,10 +24,9 @@ fn test_select_asset_from_real_repo() {
 }
 
 #[test]
-#[ignore = "Requires GitHub API access (may be rate limited)"]
 fn test_integration_download_extract_save() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent = Agent::config_builder().user_agent(&ua).build().into();
+    let agent = config::configure_agent(&ua);
 
     let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("14.1.0")).unwrap();
     let os = env::consts::OS;

@@ -129,10 +129,32 @@ fn validate_pat(token: &str) -> Result<()> {
 4. Update test files to optionally use PAT if available
 
 ### Phase 2: Testing
-1. Add unit tests for PAT loading and validation
-2. Test authenticated API calls with valid PAT
-3. Test error handling with invalid PAT
-4. Verify unauthenticated mode still works
+
+#### Integration Tests with Online Echo Servers
+Use public HTTP echo services to verify Authorization header is correctly set:
+
+1. **Primary test endpoint**: `https://postman-echo.com/{method}`
+   - GET/POST requests with configured PAT
+   - Verify `Authorization: Bearer <token>` header appears in response
+   - Test with random token to verify header transmission
+
+2. **Fallback endpoint**: `https://httpbin.org/{method}`
+   - Use if postman-echo.com is unavailable
+   - Same verification: check Authorization header in response
+   - Try another endpoint if primary fails
+
+**Test Strategy**:
+- Randomly select from available echo servers
+- If request fails, retry with next available server
+- Verify token format in echoed headers
+- Test both authenticated and unauthenticated modes
+- Ensure token doesn't leak into logs (only check presence)
+
+#### GitHub API Tests
+1. Test authenticated API calls with valid PAT (actual GitHub API)
+2. Test error handling with invalid PAT (401/403 responses)
+3. Verify unauthenticated mode still works
+4. Verify rate limit improvement with authentication
 
 ### Phase 3: GitHub Actions Integration
 1. Add `GITHUB_PAT` secret to repository settings

@@ -30,6 +30,32 @@ Download from [releases](https://github.com/lucidfrontier45/grd/releases).
 
 Download the latest release of a repository:
 
+### Authentication
+
+To avoid GitHub API rate limits (60 requests/hour unauthenticated vs 5000/hour authenticated), you can configure a GitHub Personal Access Token (PAT):
+
+**Using environment variables:**
+
+```bash
+export GITHUB_PAT=your_token_here
+# or
+export GITHUB_TOKEN=your_token_here
+```
+
+**Using a .env file:**
+
+Create a `.env` file in your working directory:
+
+```bash
+GITHUB_PAT=your_token_here
+```
+
+The `GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
+
+### Basic Commands
+
+Download the latest release of a repository:
+
 ```bash
 grd owner/repo
 ```

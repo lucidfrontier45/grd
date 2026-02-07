@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use clap::Parser;
-use grd::{asset, cli::Args, download, extract, github};
+use grd::{asset, cli::Args, config, download, extract, github};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -19,7 +19,7 @@ fn main() -> Result<()> {
     }
 
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent: ureq::Agent = ureq::Agent::config_builder().user_agent(&ua).build().into();
+    let agent = config::configure_agent(&ua);
 
     if args.list {
         let releases = github::list_releases(&agent, &args.repo)?;

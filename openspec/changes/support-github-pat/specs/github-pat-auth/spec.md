@@ -20,10 +20,6 @@ The system SHALL read the GitHub Personal Access Token from environment variable
 ### Requirement: Load PAT from .env file
 The system SHALL support reading GitHub Personal Access Token from a `.env` file in the current working directory, checking for `GITHUB_PAT` or `GITHUB_TOKEN` keys.
 
-#### Scenario: PAT loaded from .env file
-- **WHEN** `.env` file exists in current directory and contains `GITHUB_PAT` or `GITHUB_TOKEN`
-- **THEN** system SHALL load and use the token value from the file
-
 #### Scenario: Environment variables take precedence over .env
 - **WHEN** both environment variables and `.env` file contain PAT values
 - **THEN** system SHALL prioritize environment variable values over `.env` file values

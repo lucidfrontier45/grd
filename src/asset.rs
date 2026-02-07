@@ -3,7 +3,7 @@ use std::{
     io::{self, Write},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::github::Asset;
 
