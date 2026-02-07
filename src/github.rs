@@ -95,6 +95,7 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{configure_agent, get_auth_token};
 
     #[test]
     fn test_asset_size_display() {
@@ -131,7 +132,8 @@ mod tests {
     #[test]
     fn test_fetch_release_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-        let agent = crate::config::configure_agent(&ua);
+        let token = get_auth_token();
+        let agent = configure_agent(&ua, token.as_deref());
 
         let result = fetch_release_info(&agent, "lucidfrontier45/grd", None);
         assert!(result.is_ok());
@@ -144,7 +146,8 @@ mod tests {
     #[test]
     fn test_list_releases_from_real_repo() {
         let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-        let agent = crate::config::configure_agent(&ua);
+        let token = get_auth_token();
+        let agent = configure_agent(&ua, token.as_deref());
 
         let result = list_releases(&agent, "lucidfrontier45/grd");
         assert!(result.is_ok());

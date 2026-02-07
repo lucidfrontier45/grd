@@ -32,7 +32,7 @@ fn validate_pat_format(token: &str) -> Result<()> {
 ///
 /// Returns `Some(token)` if a valid token is found, or `None` if no token is configured
 /// or if the token format validation fails.
-pub fn get_pat() -> Option<String> {
+pub fn get_auth_token() -> Option<String> {
     load_dotenv();
 
     if let Some(token) = load_pat_from_env() {
@@ -50,19 +50,19 @@ pub fn get_pat() -> Option<String> {
 /// Create a configured ureq Agent with the specified user agent and optional PAT authentication.
 ///
 /// This function creates an HTTP client (Agent) configured with the provided user agent string.
-/// If a GitHub PAT is available via environment variables or .env file, it automatically adds
-/// the Authorization header to all requests through middleware.
+/// If a token is provided, it will be automatically added to all requests through middleware.
+/// If token is None, no authentication header will be sent.
 ///
 /// # Arguments
 ///
 /// * `user_agent` - The user agent string to identify this client to servers
+/// * `token` - An optional authentication token string. If None, no auth header is sent
 ///
 /// # Returns
 ///
-/// A configured `ureq::Agent` instance ready to make HTTP requests, with automatic PAT authentication
-/// if configured
-pub fn configure_agent(user_agent: &str) -> Agent {
-    let auth_header = get_auth_header();
+/// A configured `ureq::Agent` instance ready to make HTTP requests
+pub fn configure_agent(user_agent: &str, token: Option<&str>) -> Agent {
+    let auth_header = token.map(|t| format!("Bearer {t}"));
 
     let mut builder = ureq::Agent::config_builder().user_agent(user_agent);
 
@@ -71,19 +71,6 @@ pub fn configure_agent(user_agent: &str) -> Agent {
     }
 
     builder.build().into()
-}
-
-/// Get the Authorization header value for GitHub API requests.
-///
-/// This function retrieves the PAT using `get_pat()` and formats it as a Bearer token
-/// suitable for use in the `Authorization` header. Returns `None` if no PAT is configured.
-///
-/// # Returns
-///
-/// * `Some("Bearer <token>")` if a PAT is available
-/// * `None` if no PAT is configured
-pub fn get_auth_header() -> Option<String> {
-    get_pat().map(|token| format!("Bearer {token}"))
 }
 
 struct AuthMiddleware {
@@ -106,49 +93,29 @@ impl Middleware for AuthMiddleware {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::collections::HashMap;
+
+    use serde::Deserialize;
 
     use super::*;
 
+    #[derive(Deserialize)]
+    struct HeadersResponse {
+        headers: HashMap<String, String>,
+    }
+
     #[test]
     fn test_token_set_in_http_request() {
-        let original_pat = env::var("GITHUB_PAT").ok();
+        let token = "test_token";
+        let agent = configure_agent("test-agent", Some(token));
 
-        unsafe {
-            env::set_var("GITHUB_PAT", "ghp_test_token_123456789012345678901234567");
-        }
-
-        let received_header = Arc::new(Mutex::new(None::<String>));
-
-        let agent = configure_agent("test-agent");
-
-        let received_header_clone = Arc::clone(&received_header);
-        let _guard = agent
-            .get("https://httpbin.org/headers")
-            .call()
-            .ok()
-            .and_then(|mut resp| {
-                let body = resp.body_mut().read_to_string().ok()?;
-                let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-                let auth = json["headers"]["Authorization"].as_str()?;
-                let _ = received_header_clone
-                    .lock()
-                    .unwrap()
-                    .insert(auth.to_string());
-                Some(())
-            });
-
-        let header = received_header.lock().unwrap();
-        assert_eq!(
-            header.as_ref().unwrap(),
-            "Bearer ghp_test_token_123456789012345678901234567"
-        );
-
-        drop(header);
-
-        match original_pat {
-            Some(val) => unsafe { env::set_var("GITHUB_PAT", val) },
-            None => unsafe { env::remove_var("GITHUB_PAT") },
-        }
+        let mut resp = agent.get("https://httpbin.org/headers").call().unwrap();
+        let recieved_token: HeadersResponse = resp.body_mut().read_json().unwrap();
+        let auth_header = recieved_token
+            .headers
+            .get("Authorization")
+            .cloned()
+            .unwrap();
+        assert_eq!(auth_header, format!("Bearer {}", token));
     }
 }

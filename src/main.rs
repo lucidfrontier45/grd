@@ -19,7 +19,8 @@ fn main() -> Result<()> {
     }
 
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let agent = config::configure_agent(&ua);
+    let token = config::get_auth_token();
+    let agent = config::configure_agent(&ua, token.as_deref());
 
     if args.list {
         let releases = github::list_releases(&agent, &args.repo)?;

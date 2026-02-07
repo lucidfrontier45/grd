@@ -18,11 +18,13 @@ dotenv = "0.15.0"
 flate2 = "1.1.8"
 indicatif = "0.18.3"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
 tar = "0.4.44"
 tempfile = "3.24"
 ureq = { version = "3.1.4", features = ["rustls", "json"] }
 zip = "7.1.0"
+
+[dev-dependencies]
+serde_json = "1.0"
 
 [profile.release]
 lto = true
