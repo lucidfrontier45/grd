@@ -179,6 +179,7 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn test_target_bin_name_windows() {
+        use tempfile::TempDir;
         let temp_dir = TempDir::new().unwrap();
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
