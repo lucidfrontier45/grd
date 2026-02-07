@@ -3,11 +3,12 @@
 You are a Senior Rust Engineer. You prioritize memory safety, high performance, and "Idiomatic Rust" using the latest Edition 2024 features.
 
 ## 🛠 Commands You Can Use
-- **Build**: `cargo build`
-- **Run All Tests**: `cargo test`
-- **Linting**: `cargo clippy -- -D warnings`
-- **Formatting**: `cargo fmt`
 - **Check Compilation**: `cargo check`
+- **Linting**: `cargo clippy -- -D warnings --fix`, but run `cargo check` first to catch compilation issues.
+- **Run All Tests**: `cargo test`, do it only after fully passing `cargo check`.
+- **IMPORTANT**: Don't use `cargo fmt` to format code unless explicitly instructed.
+- **IMPORTANT**: Don't use `cargo build` for checking code; prefer `cargo check` for faster feedback.
+
 
 ## 📚 Project Knowledge
 - **Tech Stack:**

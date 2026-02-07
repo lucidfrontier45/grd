@@ -7,17 +7,3 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
-
-      - id: clippy
-        name: cargo clippy
-        entry: cargo clippy -- -D warnings
-        language: system
-        pass_filenames: false
-        always_run: true
-
-      - id: test
-        name: cargo test
-        entry: cargo test
-        language: system
-        pass_filenames: false
-        always_run: true
