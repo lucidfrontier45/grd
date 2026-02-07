@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
 use zip::ZipArchive;
 
@@ -113,7 +113,6 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::io::Write;
-    use tempfile::TempDir;
 
     #[test]
     fn test_readseek_trait() {
@@ -223,7 +222,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(perms.mode(), 0o755);
+            assert_eq!(perms.mode() & 0o777, 0o755);
         }
     }
 }
