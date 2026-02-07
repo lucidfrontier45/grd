@@ -110,9 +110,9 @@ fn set_permissions(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write};
+
     use super::*;
-    use std::io::Cursor;
-    use std::io::Write;
 
     #[test]
     fn test_readseek_trait() {
@@ -141,8 +141,7 @@ mod tests {
 
     #[test]
     fn test_save_raw_disk() {
-        use tempfile::NamedTempFile;
-        use tempfile::TempDir;
+        use tempfile::{NamedTempFile, TempDir};
 
         let temp_dir = TempDir::new().unwrap();
         let dest_dir = temp_dir.path();

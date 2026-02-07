@@ -1,9 +1,10 @@
 repos:
   - repo: local
     hooks:
-      - id: fmt
-        name: cargo fmt
-        entry: cargo fmt
+      - id: cargo-fmt-nightly
+        name: cargo fmt (nightly)
+        entry: rustup run nightly cargo fmt -- --check
         language: system
+        types: [rust]
         pass_filenames: false
         always_run: true

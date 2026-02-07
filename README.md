@@ -101,3 +101,31 @@ cargo clippy
 cargo test
 cargo build --release
 ```
+
+## Git hooks
+
+Set up a local git hook to run checks automatically using `pre-commit`.
+
+- Install `pre-commit` (recommended: `pip`; or use `uv` if you manage tools that way):
+
+```bash
+# with pip (user install)
+pip install --user pre-commit
+
+# with uv (if you use `uv` to manage tools)
+uv tool install pre-commit
+```
+
+- Install the git hook into this repository (generates the hook script under `.git/hooks`):
+
+```bash
+pre-commit install
+```
+
+- (Optional) Run all configured hooks once across the repo:
+
+```bash
+pre-commit run --all-files
+```
+
+This ensures linters and formatters configured in `.pre-commit-config.yaml` run automatically on commit.
