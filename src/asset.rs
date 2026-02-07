@@ -1,8 +1,63 @@
+use std::collections::HashMap;
 use std::io::{self, Write};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::github::Asset;
+
+struct PlatformAlias {
+    canonical_os: &'static str,
+    inferred_arch: Option<&'static str>,
+}
+
+static PLATFORM_ALIASES: LazyLock<HashMap<&str, PlatformAlias>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    m.insert(
+        "win",
+        PlatformAlias {
+            canonical_os: "windows",
+            inferred_arch: None,
+        },
+    );
+    m.insert(
+        "win32",
+        PlatformAlias {
+            canonical_os: "windows",
+            inferred_arch: Some("x86_64"),
+        },
+    );
+    m.insert(
+        "win64",
+        PlatformAlias {
+            canonical_os: "windows",
+            inferred_arch: Some("x86_64"),
+        },
+    );
+    m
+});
+
+fn normalize_platform_identifier(platform: &str) -> (String, Option<String>) {
+    let normalized = platform.to_lowercase();
+
+    if let Some(alias_info) = PLATFORM_ALIASES.get(normalized.as_str()) {
+        return (
+            alias_info.canonical_os.to_string(),
+            alias_info.inferred_arch.map(|s| s.to_string()),
+        );
+    }
+
+    (normalized.clone(), None)
+}
+
+use std::sync::LazyLock;
+
+#[allow(dead_code)]
+fn infer_architecture_from_platform(platform: &str) -> Option<String> {
+    let normalized = platform.to_lowercase();
+    PLATFORM_ALIASES
+        .get(normalized.as_str())
+        .and_then(|alias| alias.inferred_arch.map(|s| s.to_string()))
+}
 
 pub fn normalize_os(input: &str) -> Result<String> {
     let normalized = input.to_lowercase();
@@ -45,15 +100,25 @@ pub fn select_asset(
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
 
+    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+
+    let effective_arch = if inferred_arch.is_some() {
+        inferred_arch
+    } else {
+        Some(arch.to_string())
+    };
+
     let matches: Vec<&Asset> = assets
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
-            let os_match = match os {
+            let os_match = match normalized_os.as_str() {
                 "windows" => {
                     name.contains("windows")
                         || name.contains("win64")
                         || name.contains("pc-windows")
+                        || name.contains("win32")
+                        || name.contains("win")
                 }
                 "macos" => {
                     name.contains("apple-darwin")
@@ -63,11 +128,11 @@ pub fn select_asset(
                 "linux" => name.contains("linux") || name.contains("unknown-linux"),
                 _ => false,
             };
-            let arch_match = match arch {
-                "x86_64" => {
+            let arch_match = match effective_arch.as_deref() {
+                Some("x86_64") => {
                     name.contains("x86_64") || name.contains("amd64") || name.contains("x64")
                 }
-                "aarch64" => name.contains("aarch64") || name.contains("arm64"),
+                Some("aarch64") => name.contains("aarch64") || name.contains("arm64"),
                 _ => false,
             };
             os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
@@ -275,5 +340,185 @@ mod unit_tests {
 
         let result = select_asset(&assets, "linux", "x86_64", false, None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_win() {
+        let (os, arch) = normalize_platform_identifier("win");
+        assert_eq!(os, "windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_win32() {
+        let (os, arch) = normalize_platform_identifier("win32");
+        assert_eq!(os, "windows");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_win64() {
+        let (os, arch) = normalize_platform_identifier("win64");
+        assert_eq!(os, "windows");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_windows() {
+        let (os, arch) = normalize_platform_identifier("windows");
+        assert_eq!(os, "windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_unknown() {
+        let (os, arch) = normalize_platform_identifier("unknown_platform");
+        assert_eq!(os, "unknown_platform");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_case_insensitive_lowercase() {
+        let (os, arch) = normalize_platform_identifier("win");
+        assert_eq!(os, "windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_case_insensitive_uppercase() {
+        let (os, arch) = normalize_platform_identifier("WIN");
+        assert_eq!(os, "windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_case_insensitive_mixed() {
+        let (os, arch) = normalize_platform_identifier("WiN");
+        assert_eq!(os, "windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_win32_mixed_case() {
+        let (os, arch) = normalize_platform_identifier("Win32");
+        assert_eq!(os, "windows");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_win64_uppercase() {
+        let (os, arch) = normalize_platform_identifier("WIN64");
+        assert_eq!(os, "windows");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_win32() {
+        let arch = infer_architecture_from_platform("win32");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_win64() {
+        let arch = infer_architecture_from_platform("win64");
+        assert_eq!(arch, Some("x86_64".to_string()));
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_win() {
+        let arch = infer_architecture_from_platform("win");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_windows() {
+        let arch = infer_architecture_from_platform("windows");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_select_asset_windows_variant_win() {
+        let assets = vec![Asset {
+            name: "app-win-x86_64.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-win-x86_64.zip");
+    }
+
+    #[test]
+    fn test_select_asset_windows_variant_win32() {
+        let assets = vec![Asset {
+            name: "app-win32-x86_64.exe".to_string(),
+            browser_download_url: "https://example.com/app.exe".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win32", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-win32-x86_64.exe");
+    }
+
+    #[test]
+    fn test_select_asset_windows_variant_win64() {
+        let assets = vec![Asset {
+            name: "app-win64-x86_64.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win64", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-win64-x86_64.zip");
+    }
+
+    #[test]
+    fn test_select_asset_windows_mixed_patterns() {
+        let assets = vec![
+            Asset {
+                name: "app-win-x86_64.zip".to_string(),
+                browser_download_url: "https://example.com/app1.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-win32-x86_64.exe".to_string(),
+                browser_download_url: "https://example.com/app2.exe".to_string(),
+                size: 2048,
+            },
+            Asset {
+                name: "app-win64-x86_64.zip".to_string(),
+                browser_download_url: "https://example.com/app3.zip".to_string(),
+                size: 3072,
+            },
+        ];
+
+        let result = select_asset(&assets, "win", "x86_64", true, None).unwrap();
+        assert_eq!(result.name, "app-win-x86_64.zip");
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_empty_string() {
+        let (os, arch) = normalize_platform_identifier("");
+        assert_eq!(os, "");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_empty_string() {
+        let arch = infer_architecture_from_platform("");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_normalize_platform_identifier_unknown_platform() {
+        let (os, arch) = normalize_platform_identifier("freebsd");
+        assert_eq!(os, "freebsd");
+        assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_infer_architecture_from_platform_unknown_platform() {
+        let arch = infer_architecture_from_platform("freebsd");
+        assert!(arch.is_none());
     }
 }
