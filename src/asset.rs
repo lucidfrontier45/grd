@@ -180,7 +180,7 @@ pub fn select_asset(
     assets: &[Asset],
     os: &str,
     arch: &str,
-    _select: bool,
+    force_select: bool,
     exclude: Option<&str>,
 ) -> Result<Asset> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
@@ -228,56 +228,80 @@ pub fn select_asset(
         })
         .collect();
 
-    match matches.len() {
-        0 => {
-            if io::stdin().is_terminal() {
-                let mut all_assets: Vec<&Asset> = assets
-                    .iter()
-                    .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
-                    .collect();
-                sort_by_score(
-                    &mut all_assets,
-                    &normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch),
-                );
-                println!(
-                    "No matching asset found for {}-{}. Select from available assets:",
-                    os, arch
-                );
-                show_all_assets(
-                    &all_assets,
-                    &normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch),
-                );
-                let selected = collect_selection(&all_assets)?;
-                Ok(selected.clone())
-            } else {
-                bail!("No matching asset found for {}-{}", os, arch);
-            }
+    if force_select {
+        if io::stdin().is_terminal() {
+            let mut all_assets: Vec<&Asset> = assets
+                .iter()
+                .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
+                .collect();
+            sort_by_score(
+                &mut all_assets,
+                &normalized_os,
+                effective_arch.as_deref().unwrap_or(arch),
+            );
+            println!("Select an asset:");
+            show_all_assets(
+                &all_assets,
+                &normalized_os,
+                effective_arch.as_deref().unwrap_or(arch),
+            );
+            let selected = collect_selection(&all_assets)?;
+            Ok(selected.clone())
+        } else {
+            bail!("Cannot force select in non-terminal environment");
         }
-        1 => Ok(matches[0].clone()),
-        _ => {
-            if io::stdin().is_terminal() {
-                let mut sorted_matches = matches.clone();
-                sort_by_score(
-                    &mut sorted_matches,
-                    &normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch),
-                );
-                println!("Multiple assets found. Select one:");
-                show_all_assets(
-                    &sorted_matches,
-                    &normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch),
-                );
-                let selected = collect_selection(&sorted_matches)?;
-                Ok(selected.clone())
-            } else {
-                bail!(
-                    "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
-                    os,
-                    arch
-                );
+    } else {
+        match matches.len() {
+            0 => {
+                if io::stdin().is_terminal() {
+                    let mut all_assets: Vec<&Asset> = assets
+                        .iter()
+                        .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
+                        .collect();
+                    sort_by_score(
+                        &mut all_assets,
+                        &normalized_os,
+                        effective_arch.as_deref().unwrap_or(arch),
+                    );
+                    println!(
+                        "No matching asset found for {}-{}. Select from available assets:",
+                        os, arch
+                    );
+                    show_all_assets(
+                        &all_assets,
+                        &normalized_os,
+                        effective_arch.as_deref().unwrap_or(arch),
+                    );
+                    let selected = collect_selection(&all_assets)?;
+                    Ok(selected.clone())
+                } else {
+                    bail!("No matching asset found for {}-{}", os, arch);
+                }
+            }
+            1 => Ok(matches[0].clone()),
+            _ => {
+                if io::stdin().is_terminal() {
+                    let mut sorted_matches = matches.clone();
+                    sort_by_score(
+                        &mut sorted_matches,
+                        &normalized_os,
+                        effective_arch.as_deref().unwrap_or(arch),
+                    );
+                    println!("Multiple assets found. Select one:");
+                    show_all_assets(
+                        &sorted_matches,
+                        &normalized_os,
+                        effective_arch.as_deref().unwrap_or(arch),
+                    );
+                    let selected = collect_selection(&sorted_matches)?;
+                    Ok(selected.clone())
+                } else {
+                    bail!(
+                        "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
+                        os,
+                        arch
+                    );
+                }
             }
         }
     }
@@ -487,8 +511,12 @@ mod tests {
             },
         ];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-linux-x86_64.tar.gz");
+        // In non-terminal environment, multiple matches should error
+        let result = select_asset(&assets, "linux", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "Multiple matches should error in non-terminal environment"
+        );
     }
 
     #[test]
@@ -506,8 +534,20 @@ mod tests {
             },
         ];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-x86_64-linux.tar.gz");
+        // In non-terminal environment, multiple matches should error
+        let result = select_asset(&assets, "linux", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "Multiple matches should error in non-terminal environment"
+        );
+
+        if let Err(e) = result {
+            let error_msg = e.to_string().to_lowercase();
+            assert!(
+                error_msg.contains("multiple") || error_msg.contains("select"),
+                "Error message should mention multiple assets and suggest --select flag"
+            );
+        }
     }
 
     #[test]
@@ -694,8 +734,12 @@ mod tests {
             },
         ];
 
-        let result = select_asset(&assets, "win", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-win-x86_64.zip");
+        // In non-terminal environment, multiple matches should error
+        let result = select_asset(&assets, "win", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "Multiple matches should error in non-terminal environment"
+        );
     }
 
     #[test]
@@ -785,17 +829,18 @@ mod tests {
     }
 
     #[test]
-    fn test_select_select_flag_accepted_in_signature() {
+    fn test_select_force_select_flag_non_terminal_error() {
         let assets = vec![Asset {
             name: "app-linux-x86_64.tar.gz".to_string(),
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
 
-        // The _select parameter is accepted in function signature (for API compatibility)
-        // In non-terminal, it doesn't change behavior since stdin is not a terminal
+        // In non-terminal environment, --select flag should error
         let result = select_asset(&assets, "linux", "x86_64", true, None);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().name, "app-linux-x86_64.tar.gz");
+        assert!(
+            result.is_err(),
+            "Force select should error in non-terminal environment"
+        );
     }
 }
