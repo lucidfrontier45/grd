@@ -8,7 +8,6 @@ After coding is finished check code correctness in the following order. If any s
 2. use `cargo test -q` to execute all tests and ensure correctness. 
 3. use `cargo clippy -q --fix --allow-dirty` to automatically fix lint issues.
 4. use `cargo clippy -q -- -D warnings` to ensure no lint warnings remain.
-5. use `cargo fmt` to ensure code is properly formatted.
 
 ## 📚 Project Knowledge
 - **Tech Stack:**
