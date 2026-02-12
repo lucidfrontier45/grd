@@ -265,6 +265,9 @@ fn interactive_select(
         .iter()
         .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
         .collect();
+    if all_assets.is_empty() {
+        bail!("No assets available after applying filters");
+    }
     sort_by_score(
         &mut all_assets,
         normalized_os,
