@@ -97,7 +97,7 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
 
     let os_patterns = match target_os {
         "windows" => vec!["windows", "pc-windows", "win64", "win32", "win"],
-        "macos" => vec!["apple-darwin", "macos"],
+        "macos" => vec!["apple-darwin", "darwin", "macos"],
         "linux" => vec!["linux", "unknown-linux"],
         _ => vec![],
     };
