@@ -52,7 +52,7 @@ fn main() -> Result<()> {
         &release.assets,
         &os,
         &arch,
-        args.first,
+        args.select,
         args.exclude.as_deref(),
     )?;
     println!("Selected asset: {}", asset.name);

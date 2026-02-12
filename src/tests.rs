@@ -20,7 +20,7 @@ fn test_select_asset_from_real_repo() {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    let result = select_asset(&release.assets, os, arch, true, None);
+    let result = select_asset(&release.assets, os, arch, false, None);
     assert!(result.is_ok());
 
     let selected = result.unwrap();
@@ -37,7 +37,7 @@ fn test_integration_download_extract_save() {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    let asset = select_asset(&release.assets, os, arch, true, None).unwrap();
+    let asset = select_asset(&release.assets, os, arch, false, None).unwrap();
     let memory_limit = 10 * 1024 * 1024;
 
     dbg!(&asset);

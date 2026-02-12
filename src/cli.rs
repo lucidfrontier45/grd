@@ -20,7 +20,7 @@ pub struct Args {
     pub bin_name: Option<String>,
 
     #[arg(long)]
-    pub first: bool,
+    pub select: bool,
 
     #[arg(long)]
     pub exclude: Option<String>,

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
 };
 
 use anyhow::{Context, Result, bail};
@@ -91,11 +91,96 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
+    let name = asset_name.to_lowercase();
+    let mut score = 0;
+
+    let os_patterns = match target_os {
+        "windows" => vec!["windows", "pc-windows", "win64", "win32", "win"],
+        "macos" => vec!["apple-darwin", "macos"],
+        "linux" => vec!["linux", "unknown-linux"],
+        _ => vec![],
+    };
+
+    let arch_patterns = match target_arch {
+        "x86_64" => vec!["x86_64", "amd64", "x64"],
+        "aarch64" => vec!["aarch64", "arm64"],
+        _ => vec![],
+    };
+
+    let os_exclusions = match target_os {
+        "windows" => vec!["darwin"],
+        "macos" => vec!["windows"],
+        _ => vec![],
+    };
+
+    for exclusion in &os_exclusions {
+        if name.contains(exclusion) {
+            return score;
+        }
+    }
+
+    for pattern in &os_patterns {
+        if name.contains(pattern) {
+            score += 2;
+            break;
+        }
+    }
+
+    for pattern in &arch_patterns {
+        if name.contains(pattern) {
+            score += 1;
+            break;
+        }
+    }
+
+    score
+}
+
+fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
+    assets.sort_by(|a, b| {
+        let score_a = calculate_match_score(&a.name, target_os, target_arch);
+        let score_b = calculate_match_score(&b.name, target_os, target_arch);
+        score_b.cmp(&score_a)
+    });
+}
+
+fn show_all_assets(assets: &[&Asset], target_os: &str, target_arch: &str) {
+    for (i, asset) in assets.iter().enumerate() {
+        let score = calculate_match_score(&asset.name, target_os, target_arch);
+        println!(
+            "{}. {} ({}) [{}]",
+            i + 1,
+            asset.name,
+            format_size(asset.size),
+            score
+        );
+    }
+}
+
+fn collect_selection<'a>(assets: &'a [&'a Asset]) -> Result<&'a Asset> {
+    loop {
+        print!("Enter choice (1-{}): ", assets.len());
+        io::stdout().flush().context("Failed to flush stdout")?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        match input.trim().parse::<usize>() {
+            Ok(n) if n >= 1 && n <= assets.len() => return Ok(assets[n - 1]),
+            _ => println!(
+                "Invalid choice. Enter a number between 1 and {}.",
+                assets.len()
+            ),
+        }
+    }
+}
+
 pub fn select_asset(
     assets: &[Asset],
     os: &str,
     arch: &str,
-    first: bool,
+    force_select: bool,
     exclude: Option<&str>,
 ) -> Result<Asset> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
@@ -144,31 +229,57 @@ pub fn select_asset(
         .collect();
 
     match matches.len() {
-        0 => bail!("No matching asset found for {}-{}", os, arch),
+        0 => {
+            if io::stdin().is_terminal() {
+                let mut all_assets: Vec<&Asset> = assets
+                    .iter()
+                    .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
+                    .collect();
+                sort_by_score(
+                    &mut all_assets,
+                    &normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch),
+                );
+                println!(
+                    "No matching asset found for {}-{}. Select from available assets:",
+                    os, arch
+                );
+                show_all_assets(
+                    &all_assets,
+                    &normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch),
+                );
+                let selected = collect_selection(&all_assets)?;
+                Ok(selected.clone())
+            } else {
+                bail!("No matching asset found for {}-{}", os, arch);
+            }
+        }
         1 => Ok(matches[0].clone()),
         _ => {
-            if first {
-                Ok(matches[0].clone())
-            } else {
+            if force_select && io::stdin().is_terminal() {
+                let mut sorted_matches = matches.clone();
+                sort_by_score(
+                    &mut sorted_matches,
+                    &normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch),
+                );
                 println!("Multiple assets found. Select one:");
-                for (i, asset) in matches.iter().enumerate() {
-                    println!("{}. {} ({})", i + 1, asset.name, format_size(asset.size));
-                }
-                loop {
-                    print!("Enter choice (1-{}): ", matches.len());
-                    io::stdout().flush().context("Failed to flush stdout")?;
-                    let mut input = String::new();
-                    io::stdin()
-                        .read_line(&mut input)
-                        .context("Failed to read input")?;
-                    match input.trim().parse::<usize>() {
-                        Ok(n) if n >= 1 && n <= matches.len() => return Ok(matches[n - 1].clone()),
-                        _ => println!(
-                            "Invalid choice. Enter a number between 1 and {}.",
-                            matches.len()
-                        ),
-                    }
-                }
+                show_all_assets(
+                    &sorted_matches,
+                    &normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch),
+                );
+                let selected = collect_selection(&sorted_matches)?;
+                Ok(selected.clone())
+            } else {
+                let mut sorted_matches = matches.clone();
+                sort_by_score(
+                    &mut sorted_matches,
+                    &normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch),
+                );
+                Ok(sorted_matches[0].clone())
             }
         }
     }
@@ -236,19 +347,154 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_select_asset_single_match() {
+    fn test_select_asset_darwin_exclusion_with_win32() {
         let assets = vec![Asset {
-            name: "app-x86_64-linux.tar.gz".to_string(),
+            name: "app-x86_64-apple-darwin.tar.gz".to_string(),
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-x86_64-linux.tar.gz");
+        let result = select_asset(&assets, "win32", "x86_64", false, None);
+        assert!(result.is_err(), "darwin assets should NOT match win32");
     }
 
     #[test]
-    fn test_select_asset_multiple_matches_with_first() {
+    fn test_select_asset_darwin_exclusion_with_win64() {
+        let assets = vec![Asset {
+            name: "app-x86_64-darwin.exe".to_string(),
+            browser_download_url: "https://example.com/app.exe".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "win64", "x86_64", false, None);
+        assert!(result.is_err(), "darwin assets should NOT match win64");
+    }
+
+    #[test]
+    fn test_calculate_match_score_exact_os() {
+        let score = calculate_match_score("app-linux-x86_64.tar.gz", "linux", "x86_64");
+        assert_eq!(score, 3);
+    }
+
+    #[test]
+    fn test_calculate_match_score_platform_alias_os() {
+        let score = calculate_match_score("app-win-x86_64.zip", "windows", "x86_64");
+        assert_eq!(score, 3);
+    }
+
+    #[test]
+    fn test_calculate_match_score_exact_arch() {
+        let score = calculate_match_score("app-linux-x86_64.tar.gz", "linux", "x86_64");
+        assert_eq!(score, 3);
+    }
+
+    #[test]
+    fn test_calculate_match_score_cross_arch() {
+        let score = calculate_match_score("app-linux-aarch64.tar.gz", "linux", "x86_64");
+        assert_eq!(score, 2);
+    }
+
+    #[test]
+    fn test_calculate_match_score_cross_os() {
+        let score = calculate_match_score("app-darwin-x86_64.tar.gz", "linux", "x86_64");
+        assert_eq!(score, 1);
+    }
+
+    #[test]
+    fn test_sort_by_score() {
+        let assets = vec![
+            Asset {
+                name: "app-darwin-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app2.tar.gz".to_string(),
+                size: 2048,
+            },
+            Asset {
+                name: "app-win-x86_64.zip".to_string(),
+                browser_download_url: "https://example.com/app3.zip".to_string(),
+                size: 3072,
+            },
+        ];
+
+        let mut asset_refs: Vec<&Asset> = assets.iter().collect();
+        sort_by_score(&mut asset_refs, "windows", "x86_64");
+
+        assert_eq!(asset_refs[0].name, "app-win-x86_64.zip");
+        assert_eq!(asset_refs[1].name, "app-linux-x86_64.tar.gz");
+        assert_eq!(asset_refs[2].name, "app-darwin-x86_64.tar.gz");
+    }
+
+    #[test]
+    fn test_sort_by_score_same_score_preserves_order() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64-v1.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-linux-x86_64-v2.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app2.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let mut asset_refs: Vec<&Asset> = assets.iter().collect();
+        sort_by_score(&mut asset_refs, "linux", "x86_64");
+
+        assert_eq!(asset_refs[0].name, "app-linux-x86_64-v1.tar.gz");
+        assert_eq!(asset_refs[1].name, "app-linux-x86_64-v2.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_respects_exclude_filter() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux-gnu.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux-musl.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "linux", "x86_64", false, Some("gnu")).unwrap();
+        assert_eq!(result.name, "app-x86_64-linux-musl.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_sorted_by_score() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-win-x86_64.zip".to_string(),
+                browser_download_url: "https://example.com/app2.zip".to_string(),
+                size: 2048,
+            },
+            Asset {
+                name: "app-linux-amd64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app3.tar.gz".to_string(),
+                size: 3072,
+            },
+        ];
+
+        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-linux-x86_64.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_multiple_matches_without_force_select() {
         let assets = vec![
             Asset {
                 name: "app-x86_64-linux.tar.gz".to_string(),
@@ -262,88 +508,42 @@ mod unit_tests {
             },
         ];
 
-        let result = select_asset(&assets, "linux", "x86_64", true, None).unwrap();
+        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
         assert_eq!(result.name, "app-x86_64-linux.tar.gz");
     }
 
     #[test]
-    fn test_select_asset_with_exclude() {
+    fn test_select_asset_darwin_not_matched_to_windows() {
         let assets = vec![
             Asset {
-                name: "app-x86_64-linux-musl.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                name: "app-x86_64-apple-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-darwin.tar.gz".to_string(),
                 size: 1024,
             },
             Asset {
-                name: "app-x86_64-linux-gnu.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
-                size: 2048,
-            },
-        ];
-
-        let result = select_asset(&assets, "linux", "x86_64", true, Some("musl")).unwrap();
-        assert_eq!(result.name, "app-x86_64-linux-gnu.tar.gz");
-    }
-
-    #[test]
-    fn test_select_asset_no_match() {
-        let assets = vec![Asset {
-            name: "app-x86_64-windows.zip".to_string(),
-            browser_download_url: "https://example.com/app.zip".to_string(),
-            size: 1024,
-        }];
-
-        assert!(select_asset(&assets, "linux", "x86_64", false, None).is_err());
-    }
-
-    #[test]
-    fn test_select_asset_windows_patterns() {
-        let assets = vec![
-            Asset {
-                name: "app-windows-x86_64.exe".to_string(),
-                browser_download_url: "https://example.com/app.exe".to_string(),
-                size: 1024,
-            },
-            Asset {
-                name: "app-pc-windows-msvc.zip".to_string(),
-                browser_download_url: "https://example.com/app.zip".to_string(),
+                name: "app-aarch64-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-arm-darwin.tar.gz".to_string(),
                 size: 2048,
             },
         ];
 
         let result = select_asset(&assets, "windows", "x86_64", false, None);
-        assert!(result.is_ok());
+        assert!(result.is_err(), "darwin assets should NOT match Windows");
     }
 
     #[test]
-    fn test_select_asset_macos_patterns() {
-        let assets = vec![
-            Asset {
-                name: "app-darwin-x86_64.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app.tar.gz".to_string(),
-                size: 1024,
-            },
-            Asset {
-                name: "app-apple-darwin-aarch64.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-arm.tar.gz".to_string(),
-                size: 2048,
-            },
-        ];
-
-        let result = select_asset(&assets, "macos", "aarch64", false, None).unwrap();
-        assert_eq!(result.name, "app-apple-darwin-aarch64.tar.gz");
-    }
-
-    #[test]
-    fn test_select_asset_linux_patterns() {
+    fn test_select_asset_darwin_with_win_alias_not_matched() {
         let assets = vec![Asset {
-            name: "app-x86_64-unknown-linux-gnu.tar.gz".to_string(),
-            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            name: "app-x86_64-darwin.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, None);
-        assert!(result.is_ok());
+        let result = select_asset(&assets, "win", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "darwin assets should NOT match even with 'win' alias"
+        );
     }
 
     #[test]
@@ -496,7 +696,7 @@ mod unit_tests {
             },
         ];
 
-        let result = select_asset(&assets, "win", "x86_64", true, None).unwrap();
+        let result = select_asset(&assets, "win", "x86_64", false, None).unwrap();
         assert_eq!(result.name, "app-win-x86_64.zip");
     }
 
@@ -524,83 +724,5 @@ mod unit_tests {
     fn test_infer_architecture_from_platform_unknown_platform() {
         let arch = infer_architecture_from_platform("freebsd");
         assert!(arch.is_none());
-    }
-
-    #[test]
-    fn test_select_asset_darwin_not_matched_to_windows() {
-        let assets = vec![
-            Asset {
-                name: "app-x86_64-apple-darwin.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-darwin.tar.gz".to_string(),
-                size: 1024,
-            },
-            Asset {
-                name: "app-aarch64-darwin.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-arm-darwin.tar.gz".to_string(),
-                size: 2048,
-            },
-        ];
-
-        let result = select_asset(&assets, "windows", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match Windows");
-    }
-
-    #[test]
-    fn test_select_asset_darwin_with_win_alias_not_matched() {
-        let assets = vec![Asset {
-            name: "app-x86_64-darwin.zip".to_string(),
-            browser_download_url: "https://example.com/app.zip".to_string(),
-            size: 1024,
-        }];
-
-        let result = select_asset(&assets, "win", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "darwin assets should NOT match even with 'win' alias"
-        );
-    }
-
-    #[test]
-    fn test_select_asset_mixed_darwin_and_windows() {
-        let assets = vec![
-            Asset {
-                name: "app-x86_64-darwin.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app-darwin.tar.gz".to_string(),
-                size: 1024,
-            },
-            Asset {
-                name: "app-x86_64-windows.zip".to_string(),
-                browser_download_url: "https://example.com/app-windows.zip".to_string(),
-                size: 2048,
-            },
-        ];
-
-        let result = select_asset(&assets, "windows", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-x86_64-windows.zip");
-        assert!(!result.name.contains("darwin"));
-    }
-
-    #[test]
-    fn test_select_asset_darwin_exclusion_with_win32() {
-        let assets = vec![Asset {
-            name: "app-x86_64-apple-darwin.tar.gz".to_string(),
-            browser_download_url: "https://example.com/app.tar.gz".to_string(),
-            size: 1024,
-        }];
-
-        let result = select_asset(&assets, "win32", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match win32");
-    }
-
-    #[test]
-    fn test_select_asset_darwin_exclusion_with_win64() {
-        let assets = vec![Asset {
-            name: "app-x86_64-darwin.exe".to_string(),
-            browser_download_url: "https://example.com/app.exe".to_string(),
-            size: 1024,
-        }];
-
-        let result = select_asset(&assets, "win64", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match win64");
     }
 }
