@@ -121,7 +121,7 @@ grd owner/repo --no-decompress
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
 - `--bin-name`: Override executable name
-- `--first`: Select first matching asset without prompting
+- `--select`: Force manual selection from all available assets
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
