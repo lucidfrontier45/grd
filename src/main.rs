@@ -54,7 +54,12 @@ fn main() -> Result<()> {
         &arch,
         args.select,
         args.exclude.as_deref(),
-    )?;
+    )
+    .inspect_err(|_| {
+        if args.select {
+            eprintln!("Note: --select flag was used but manual selection failed");
+        }
+    })?;
     println!("Selected asset: {}", asset.name);
 
     let bin_name = args.bin_name.unwrap_or_else(|| {

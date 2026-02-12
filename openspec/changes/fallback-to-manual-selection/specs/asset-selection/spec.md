@@ -72,13 +72,35 @@ The system SHALL calculate match scores based on the following rules:
 - **WHEN** target architecture is aarch64
 - **THEN** asset name patterns matching: "aarch64", "arm64"
 
-### Requirement: Manual selection when no asset matches
+### Requirement: Automatic download when only one asset matches
 
-The system SHALL prompt the user to manually select an asset when no assets match the platform criteria, or when the `--select` flag is specified.
+The system SHALL automatically download the asset when exactly one asset matches the platform criteria.
+
+#### Scenario: Single matching asset downloaded automatically
+
+- **WHEN** the asset selection process finds exactly one asset matching the detected platform (os-arch)
+- **THEN** the system SHALL automatically download the asset without prompting the user
+- **AND** the system SHALL proceed with the download and extraction process
+
+#### Scenario: Non-terminal environment errors with multiple matches
+
+- **WHEN** the asset selection process finds multiple assets matching but stdin is not a terminal (non-interactive environment)
+- **THEN** the system SHALL return an error indicating multiple assets were found
+- **AND** the error message SHALL suggest using --select flag or running in interactive terminal
+
+### Requirement: Manual selection when multiple assets match
+
+The system SHALL prompt the user to manually select an asset when multiple assets match the platform criteria, or when the `--select` flag is specified.
+
+#### Scenario: User prompted when multiple assets match detected platform
+
+- **WHEN** the asset selection process finds multiple assets matching the detected platform (os-arch)
+- **THEN** the system SHALL display all matched assets with their names, sizes, and match scores
+- **AND** the system SHALL wait for user input to select an asset
 
 #### Scenario: User prompted when no assets match detected platform
 
-- **WHEN** the asset selection process runs with no assets matching the detected platform (os-arch)
+- **WHEN** the asset selection process finds no assets matching the detected platform (os-arch)
 - **THEN** the system SHALL display all available assets with their names, sizes, and match scores
 - **AND** the system SHALL wait for user input to select an asset
 

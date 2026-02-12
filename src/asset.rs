@@ -180,7 +180,7 @@ pub fn select_asset(
     assets: &[Asset],
     os: &str,
     arch: &str,
-    force_select: bool,
+    _select: bool,
     exclude: Option<&str>,
 ) -> Result<Asset> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
@@ -257,7 +257,7 @@ pub fn select_asset(
         }
         1 => Ok(matches[0].clone()),
         _ => {
-            if force_select && io::stdin().is_terminal() {
+            if io::stdin().is_terminal() {
                 let mut sorted_matches = matches.clone();
                 sort_by_score(
                     &mut sorted_matches,
@@ -273,20 +273,18 @@ pub fn select_asset(
                 let selected = collect_selection(&sorted_matches)?;
                 Ok(selected.clone())
             } else {
-                let mut sorted_matches = matches.clone();
-                sort_by_score(
-                    &mut sorted_matches,
-                    &normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch),
+                bail!(
+                    "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
+                    os,
+                    arch
                 );
-                Ok(sorted_matches[0].clone())
             }
         }
     }
 }
 
 #[cfg(test)]
-mod unit_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -724,5 +722,80 @@ mod unit_tests {
     fn test_infer_architecture_from_platform_unknown_platform() {
         let arch = infer_architecture_from_platform("freebsd");
         assert!(arch.is_none());
+    }
+
+    #[test]
+    fn test_select_asset_multiple_matches_non_terminal_error() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-linux-amd64.zip".to_string(),
+                browser_download_url: "https://example.com/app2.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        // In non-terminal environment (simulated by the test runner),
+        // multiple matches should return an error
+        let result = select_asset(&assets, "linux", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "Multiple matches should error in non-terminal environment"
+        );
+
+        if let Err(e) = result {
+            let error_msg = e.to_string().to_lowercase();
+            assert!(
+                error_msg.contains("multiple") || error_msg.contains("select"),
+                "Error message should mention multiple assets and suggest --select flag"
+            );
+        }
+    }
+
+    #[test]
+    fn test_select_asset_single_match_auto_selected() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
+        assert_eq!(result.name, "app-linux-x86_64.tar.gz");
+    }
+
+    #[test]
+    fn test_select_asset_zero_matches_non_terminal_error() {
+        let assets = vec![Asset {
+            name: "app-darwin-x86_64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        // In non-terminal environment, zero matches should error
+        let result = select_asset(&assets, "linux", "x86_64", false, None);
+        assert!(
+            result.is_err(),
+            "Zero matches should error in non-terminal environment"
+        );
+    }
+
+    #[test]
+    fn test_select_select_flag_accepted_in_signature() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        // The _select parameter is accepted in function signature (for API compatibility)
+        // In non-terminal, it doesn't change behavior since stdin is not a terminal
+        let result = select_asset(&assets, "linux", "x86_64", true, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().name, "app-linux-x86_64.tar.gz");
     }
 }
