@@ -289,7 +289,7 @@ fn handle_multiple_matches(
 ) -> Result<Asset> {
     if !io::stdin().is_terminal() {
         bail!(
-            "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
+            "Multiple assets found for {}-{}. Refine your filters to select a single asset or run in an interactive terminal.",
             os,
             arch
         );
