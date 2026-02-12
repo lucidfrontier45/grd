@@ -195,12 +195,133 @@ pub fn select_asset(
         Some(arch.to_string())
     };
 
-    let matches: Vec<&Asset> = assets
+    let matches = collect_matches(assets, &blacklist, &normalized_os, &effective_arch);
+
+    if force_select {
+        handle_force_select(assets, &blacklist, &normalized_os, &effective_arch, arch)
+    } else {
+        match matches.len() {
+            0 => handle_no_matches(
+                assets,
+                &blacklist,
+                &normalized_os,
+                &effective_arch,
+                arch,
+                os,
+            ),
+            1 => Ok(matches[0].clone()),
+            _ => handle_multiple_matches(matches, &normalized_os, &effective_arch, arch, os),
+        }
+    }
+}
+
+fn handle_force_select(
+    assets: &[Asset],
+    blacklist: &[String],
+    normalized_os: &str,
+    effective_arch: &Option<String>,
+    arch: &str,
+) -> Result<Asset> {
+    interactive_select(
+        assets,
+        blacklist,
+        normalized_os,
+        effective_arch,
+        arch,
+        "Select an asset:",
+    )
+}
+
+fn handle_no_matches(
+    assets: &[Asset],
+    blacklist: &[String],
+    normalized_os: &str,
+    effective_arch: &Option<String>,
+    arch: &str,
+    os: &str,
+) -> Result<Asset> {
+    interactive_select(
+        assets,
+        blacklist,
+        normalized_os,
+        effective_arch,
+        arch,
+        &format!("No matching asset found for {os}-{arch}. Select from available assets:"),
+    )
+}
+
+fn interactive_select(
+    assets: &[Asset],
+    blacklist: &[String],
+    normalized_os: &str,
+    effective_arch: &Option<String>,
+    arch: &str,
+    prompt: &str,
+) -> Result<Asset> {
+    if !io::stdin().is_terminal() {
+        bail!("Cannot select asset in non-terminal environment");
+    }
+    let mut all_assets: Vec<&Asset> = assets
+        .iter()
+        .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
+        .collect();
+    sort_by_score(
+        &mut all_assets,
+        normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    );
+    println!("{prompt}");
+    show_all_assets(
+        &all_assets,
+        normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    );
+    let selected = collect_selection(&all_assets)?;
+    Ok(selected.clone())
+}
+
+fn handle_multiple_matches(
+    matches: Vec<&Asset>,
+    normalized_os: &str,
+    effective_arch: &Option<String>,
+    arch: &str,
+    os: &str,
+) -> Result<Asset> {
+    if !io::stdin().is_terminal() {
+        bail!(
+            "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
+            os,
+            arch
+        );
+    }
+    let mut sorted_matches = matches.clone();
+    sort_by_score(
+        &mut sorted_matches,
+        normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    );
+    println!("Multiple assets found. Select one:");
+    show_all_assets(
+        &sorted_matches,
+        normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    );
+    let selected = collect_selection(&sorted_matches)?;
+    Ok(selected.clone())
+}
+
+fn collect_matches<'a>(
+    assets: &'a [Asset],
+    blacklist: &[String],
+    normalized_os: &str,
+    effective_arch: &Option<String>,
+) -> Vec<&'a Asset> {
+    assets
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
 
-            let os_match = match normalized_os.as_str() {
+            let os_match = match normalized_os {
                 "windows" => {
                     (name.contains("windows")
                         || name.contains("win64")
@@ -226,85 +347,7 @@ pub fn select_asset(
             };
             os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
         })
-        .collect();
-
-    if force_select {
-        if io::stdin().is_terminal() {
-            let mut all_assets: Vec<&Asset> = assets
-                .iter()
-                .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
-                .collect();
-            sort_by_score(
-                &mut all_assets,
-                &normalized_os,
-                effective_arch.as_deref().unwrap_or(arch),
-            );
-            println!("Select an asset:");
-            show_all_assets(
-                &all_assets,
-                &normalized_os,
-                effective_arch.as_deref().unwrap_or(arch),
-            );
-            let selected = collect_selection(&all_assets)?;
-            Ok(selected.clone())
-        } else {
-            bail!("Cannot force select in non-terminal environment");
-        }
-    } else {
-        match matches.len() {
-            0 => {
-                if io::stdin().is_terminal() {
-                    let mut all_assets: Vec<&Asset> = assets
-                        .iter()
-                        .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
-                        .collect();
-                    sort_by_score(
-                        &mut all_assets,
-                        &normalized_os,
-                        effective_arch.as_deref().unwrap_or(arch),
-                    );
-                    println!(
-                        "No matching asset found for {}-{}. Select from available assets:",
-                        os, arch
-                    );
-                    show_all_assets(
-                        &all_assets,
-                        &normalized_os,
-                        effective_arch.as_deref().unwrap_or(arch),
-                    );
-                    let selected = collect_selection(&all_assets)?;
-                    Ok(selected.clone())
-                } else {
-                    bail!("No matching asset found for {}-{}", os, arch);
-                }
-            }
-            1 => Ok(matches[0].clone()),
-            _ => {
-                if io::stdin().is_terminal() {
-                    let mut sorted_matches = matches.clone();
-                    sort_by_score(
-                        &mut sorted_matches,
-                        &normalized_os,
-                        effective_arch.as_deref().unwrap_or(arch),
-                    );
-                    println!("Multiple assets found. Select one:");
-                    show_all_assets(
-                        &sorted_matches,
-                        &normalized_os,
-                        effective_arch.as_deref().unwrap_or(arch),
-                    );
-                    let selected = collect_selection(&sorted_matches)?;
-                    Ok(selected.clone())
-                } else {
-                    bail!(
-                        "Multiple assets found for {}-{}. Use --select flag to choose manually or run in interactive terminal.",
-                        os,
-                        arch
-                    );
-                }
-            }
-        }
-    }
+        .collect()
 }
 
 #[cfg(test)]
