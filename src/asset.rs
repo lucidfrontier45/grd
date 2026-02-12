@@ -120,10 +120,21 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
         }
     }
 
-    for pattern in &os_patterns {
-        if name.contains(pattern) {
-            score += 2;
-            break;
+    let exact_os_pattern = match target_os {
+        "windows" => "windows",
+        "macos" => "macos",
+        "linux" => "linux",
+        _ => "",
+    };
+
+    if !exact_os_pattern.is_empty() && name.contains(exact_os_pattern) {
+        score += 2;
+    } else {
+        for pattern in &os_patterns {
+            if name.contains(pattern) {
+                score += 1;
+                break;
+            }
         }
     }
 
@@ -447,7 +458,7 @@ mod tests {
     #[test]
     fn test_calculate_match_score_platform_alias_os() {
         let score = calculate_match_score("app-win-x86_64.zip", "windows", "x86_64");
-        assert_eq!(score, 3);
+        assert_eq!(score, 2);
     }
 
     #[test]
