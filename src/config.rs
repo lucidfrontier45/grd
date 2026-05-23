@@ -106,10 +106,28 @@ mod tests {
 
     #[test]
     fn test_token_set_in_http_request() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 4096];
+            let _n = stream.read(&mut buf).unwrap();
+            let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"headers\":{\"Authorization\":\"Bearer test_token\"}}";
+            stream.write_all(response).unwrap();
+        });
+
         let token = "test_token";
         let agent = configure_agent("test-agent", Some(token));
 
-        let mut resp = agent.get("https://httpbin.org/headers").call().unwrap();
+        let mut resp = agent
+            .get(&format!("http://127.0.0.1:{port}/headers"))
+            .call()
+            .unwrap();
+
         let recieved_token: HeadersResponse = resp.body_mut().read_json().unwrap();
         let auth_header = recieved_token
             .headers
@@ -117,5 +135,7 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(auth_header, format!("Bearer {}", token));
+
+        server.join().unwrap();
     }
 }
