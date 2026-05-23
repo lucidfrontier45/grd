@@ -32,6 +32,9 @@ pub struct Args {
     pub memory_limit: u64,
 
     #[arg(long)]
+    pub force: bool,
+
+    #[arg(long)]
     pub os: Option<String>,
 
     #[arg(long)]

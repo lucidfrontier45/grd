@@ -4,6 +4,7 @@ pub mod config;
 pub mod download;
 pub mod extract;
 pub mod github;
+pub mod state;
 
 #[cfg(test)]
 mod tests;

@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use clap::Parser;
-use grd::{asset, cli::Args, config, download, extract, github};
+use grd::{asset, cli::Args, config, download, extract, github, state};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -32,6 +32,16 @@ fn main() -> Result<()> {
 
     let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;
     println!("Selected version: {}", release.tag_name);
+
+    if args.tag.is_none() && !args.force {
+        let cache = state::State::load();
+        if let Some(cached) = cache.get_version(&args.repo)
+            && cached == release.tag_name
+        {
+            println!("Already at latest version {}", release.tag_name);
+            return Ok(());
+        }
+    }
 
     let os = match &args.os {
         Some(s) => asset::normalize_os(s)?,
@@ -79,6 +89,12 @@ fn main() -> Result<()> {
         &args.destination,
         args.no_decompress,
     )?;
+
+    if !args.list && !args.list_platforms {
+        let mut cache = state::State::load();
+        cache.set_version(&args.repo, &release.tag_name);
+        cache.save();
+    }
 
     println!(
         "Successfully installed '{}' to {:?}",
