@@ -33,6 +33,8 @@ pub fn extract_and_save(
 
     if filename.ends_with(".zip") {
         extract_zip(source, &target_bin_name, dest_dir)
+    } else if filename.ends_with(".tar.xz") {
+        extract_tar_xz(source, &target_bin_name, dest_dir)
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
         extract_tar_gz(source, &target_bin_name, dest_dir)
     } else {
@@ -66,6 +68,32 @@ fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
     };
     let mut archive = tar::Archive::new(GzDecoder::new(rdr));
+    for entry in archive.entries().context("Failed to read tar archive")? {
+        let mut file = entry.context("Failed to read tar entry")?;
+        let path = file.path()?.to_path_buf();
+        if path.to_string_lossy().ends_with(target_bin_name) {
+            let out_path = dest_dir.join(target_bin_name);
+            file.unpack(&out_path)
+                .context("Failed to unpack tar entry")?;
+            #[cfg(unix)]
+            set_permissions(&out_path)?;
+            return Ok(());
+        }
+    }
+    bail!("Executable '{}' not found in archive", target_bin_name)
+}
+
+fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+    let mut rdr: Box<dyn io::BufRead> = match source {
+        DownloadSource::Memory(bytes) => Box::new(io::BufReader::new(io::Cursor::new(bytes))),
+        DownloadSource::Disk(temp_file) => {
+            Box::new(io::BufReader::new(File::open(temp_file.path())?))
+        }
+    };
+    let mut decompressed = Vec::new();
+    lzma_rs::xz_decompress(&mut rdr, &mut decompressed)
+        .context("Failed to decompress xz archive")?;
+    let mut archive = tar::Archive::new(io::Cursor::new(decompressed));
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
@@ -158,6 +186,107 @@ mod tests {
 
         let content = fs::read(file_path).unwrap();
         assert_eq!(content, b"test content");
+    }
+
+    #[test]
+    fn test_extract_tar_xz() {
+        use tempfile::TempDir;
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("my-app").unwrap();
+            header.set_size(5);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, &b"hello"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut io::Cursor::new(&tar_bytes), &mut compressed)
+            .expect("xz compression should succeed");
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let source = DownloadSource::Memory(compressed);
+
+        let result = extract_tar_xz(source, "my-app", dest);
+        assert!(
+            result.is_ok(),
+            "extract_tar_xz failed: {:?}",
+            result.as_ref().err()
+        );
+
+        let out_path = dest.join("my-app");
+        assert!(out_path.exists());
+        let content = fs::read(out_path).unwrap();
+        assert_eq!(content, b"hello");
+    }
+
+    #[test]
+    fn test_extract_tar_xz_not_found() {
+        use tempfile::TempDir;
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path("other-binary").unwrap();
+            header.set_size(4);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, &b"test"[..]).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut io::Cursor::new(&tar_bytes), &mut compressed)
+            .expect("xz compression should succeed");
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let source = DownloadSource::Memory(compressed);
+
+        let result = extract_tar_xz(source, "my-app", dest);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_tar_xz_corrupted() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let corrupted_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00];
+        let source = DownloadSource::Memory(corrupted_data);
+
+        let result = extract_tar_xz(source, "my-app", dest);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("decompress") || err_msg.contains("xz"),
+            "Error message should mention decompression failure: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_extract_and_save_tar_xz_no_decompress() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let source = DownloadSource::Memory(vec![1, 2, 3]);
+
+        let result = extract_and_save(source, "foo.tar.xz", "app", dest, true);
+        assert!(result.is_ok());
+
+        let file_path = dest.join("foo.tar.xz");
+        assert!(file_path.exists());
     }
 
     #[test]
