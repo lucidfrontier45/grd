@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_score() {
-        let assets = vec![
+        let assets = [
             Asset {
                 name: "app-darwin-x86_64.tar.gz".to_string(),
                 browser_download_url: "https://example.com/app1.tar.gz".to_string(),
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_score_same_score_preserves_order() {
-        let assets = vec![
+        let assets = [
             Asset {
                 name: "app-linux-x86_64-v1.tar.gz".to_string(),
                 browser_download_url: "https://example.com/app1.tar.gz".to_string(),

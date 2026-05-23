@@ -32,6 +32,9 @@ pub struct Args {
     pub memory_limit: u64,
 
     #[arg(long)]
+    pub force: bool,
+
+    #[arg(long)]
     pub os: Option<String>,
 
     #[arg(long)]
@@ -39,4 +42,21 @@ pub struct Args {
 
     #[arg(long)]
     pub list_platforms: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_force_flag_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.force);
+    }
+
+    #[test]
+    fn test_force_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--force"]);
+        assert!(args.force);
+    }
 }

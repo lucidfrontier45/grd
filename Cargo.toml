@@ -19,6 +19,7 @@ flate2 = "1.1.8"
 indicatif = "0.18.3"
 serde = { version = "1.0.228", features = ["derive"] }
 tar = "0.4.44"
+toml = "0.8"
 tempfile = "3.24"
 ureq = { version = "3.1.4", features = ["rustls", "json"] }
 zip = "7.1.0"

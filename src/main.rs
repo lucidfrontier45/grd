@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use clap::Parser;
-use grd::{asset, cli::Args, config, download, extract, github};
+use grd::{asset, cli::Args, config, download, extract, github, state};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -28,6 +28,7 @@ fn main() -> Result<()> {
         for rel in releases {
             println!("  - {}", rel.tag_name);
         }
+        return Ok(());
     }
 
     let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;
@@ -62,13 +63,33 @@ fn main() -> Result<()> {
     })?;
     println!("Selected asset: {}", asset.name);
 
-    let bin_name = args.bin_name.unwrap_or_else(|| {
+    let bin_name = args.bin_name.clone().unwrap_or_else(|| {
         args.repo
             .split('/')
             .next_back()
             .unwrap_or("app")
             .to_string()
     });
+
+    if args.tag.is_none() && !args.force {
+        let target_path = if args.no_decompress {
+            args.destination.join(&asset.name)
+        } else if cfg!(windows) {
+            args.destination.join(format!("{}.exe", bin_name))
+        } else {
+            args.destination.join(&bin_name)
+        };
+        if target_path.exists() {
+            let cache = state::State::load();
+            let cache_hit = cache
+                .get_cached(&args.repo)
+                .is_some_and(|cached| cached.tag == release.tag_name && cached.asset == asset.name);
+            if cache_hit {
+                println!("Already at {} version {}", asset.name, release.tag_name);
+                return Ok(());
+            }
+        }
+    }
 
     let source = download::download_asset(&agent, &asset, args.memory_limit)?;
 
@@ -79,6 +100,10 @@ fn main() -> Result<()> {
         &args.destination,
         args.no_decompress,
     )?;
+
+    let mut cache = state::State::load();
+    cache.set_cached(&args.repo, &asset.name, &release.tag_name);
+    cache.save();
 
     println!(
         "Successfully installed '{}' to {:?}",
