@@ -10,6 +10,10 @@ pub struct State {
 
 impl State {
     fn state_path() -> Result<PathBuf, String> {
+        Self::state_path_from_env().or_else(|_| Self::state_path_default())
+    }
+
+    fn state_path_default() -> Result<PathBuf, String> {
         let home = env::var("HOME")
             .or_else(|_| env::var("USERPROFILE"))
             .map_err(|_| "HOME or USERPROFILE environment variable not set".to_string())?;
@@ -17,6 +21,18 @@ impl State {
         path.push(".grd");
         path.push("state.toml");
         Ok(path)
+    }
+
+    #[cfg(test)]
+    fn state_path_from_env() -> Result<PathBuf, String> {
+        env::var("GRD_STATE_PATH")
+            .map(PathBuf::from)
+            .map_err(|_| "GRD_STATE_PATH not set".to_string())
+    }
+
+    #[cfg(not(test))]
+    fn state_path_from_env() -> Result<PathBuf, String> {
+        Err("GRD_STATE_PATH not set".to_string())
     }
 
     pub fn load() -> Self {
@@ -137,16 +153,22 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let state_path = dir.path().join("state.toml");
 
+        unsafe {
+            env::set_var("GRD_STATE_PATH", state_path.to_str().unwrap());
+        }
+
         let mut state = State::default();
         state.set_version("owner/repo", "v1.0.0");
         state.set_version("other/repo", "v2.3.1");
+        state.save();
 
-        let content = toml::to_string_pretty(&state).unwrap();
-        fs::write(&state_path, &content).unwrap();
-
-        let loaded: State = toml::from_str(&content).unwrap();
+        let loaded = State::load();
         assert_eq!(loaded.get_version("owner/repo"), Some("v1.0.0"));
         assert_eq!(loaded.get_version("other/repo"), Some("v2.3.1"));
+
+        unsafe {
+            env::remove_var("GRD_STATE_PATH");
+        }
     }
 
     #[test]
