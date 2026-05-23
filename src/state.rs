@@ -2,10 +2,16 @@ use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CachedRelease {
+    pub tag: String,
+    pub asset: String,
+}
+
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct State {
     #[serde(rename = "versions")]
-    pub versions: HashMap<String, String>,
+    pub versions: HashMap<String, CachedRelease>,
 }
 
 impl State {
@@ -102,19 +108,26 @@ impl State {
         }
     }
 
-    pub fn get_version(&self, repo: &str) -> Option<&str> {
-        self.versions.get(repo).map(|s| s.as_str())
+    pub fn get_cached(&self, repo: &str) -> Option<&CachedRelease> {
+        self.versions.get(repo)
     }
 
-    pub fn set_version(&mut self, repo: &str, tag: &str) {
-        self.versions.insert(repo.to_string(), tag.to_string());
+    pub fn set_cached(&mut self, repo: &str, asset_name: &str, tag: &str) {
+        self.versions.insert(
+            repo.to_string(),
+            CachedRelease {
+                tag: tag.to_string(),
+                asset: asset_name.to_string(),
+            },
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    use super::*;
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -169,33 +182,52 @@ mod tests {
     }
 
     #[test]
-    fn test_set_and_get_version() {
+    fn test_set_and_get_cached() {
         let mut state = State::default();
-        state.set_version("owner/repo", "v1.0.0");
-        assert_eq!(state.get_version("owner/repo"), Some("v1.0.0"));
+        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0");
+        let cached = state.get_cached("owner/repo").unwrap();
+        assert_eq!(cached.tag, "v1.0.0");
+        assert_eq!(cached.asset, "foo-linux.tar.gz");
     }
 
     #[test]
     fn test_get_nonexistent_repo() {
         let state = State::default();
-        assert_eq!(state.get_version("no/such"), None);
+        assert!(state.get_cached("no/such").is_none());
     }
 
     #[test]
     fn test_set_overwrites_previous() {
         let mut state = State::default();
-        state.set_version("owner/repo", "v1.0.0");
-        state.set_version("owner/repo", "v2.0.0");
-        assert_eq!(state.get_version("owner/repo"), Some("v2.0.0"));
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0");
+        state.set_cached("owner/repo", "bar.tar.gz", "v2.0.0");
+        let cached = state.get_cached("owner/repo").unwrap();
+        assert_eq!(cached.tag, "v2.0.0");
+        assert_eq!(cached.asset, "bar.tar.gz");
     }
 
     #[test]
-    fn test_multiple_repos() {
+    fn test_diff_repos_independent() {
         let mut state = State::default();
-        state.set_version("a/x", "v1");
-        state.set_version("b/y", "v2");
-        assert_eq!(state.get_version("a/x"), Some("v1"));
-        assert_eq!(state.get_version("b/y"), Some("v2"));
+        state.set_cached("a/x", "asset-a.tar.gz", "v1");
+        state.set_cached("b/y", "asset-b.tar.gz", "v2");
+        let a = state.get_cached("a/x").unwrap();
+        assert_eq!(a.tag, "v1");
+        assert_eq!(a.asset, "asset-a.tar.gz");
+        let b = state.get_cached("b/y").unwrap();
+        assert_eq!(b.tag, "v2");
+        assert_eq!(b.asset, "asset-b.tar.gz");
+    }
+
+    #[test]
+    fn test_same_repo_only_one_entry() {
+        let mut state = State::default();
+        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0");
+        state.set_cached("owner/repo", "foo-macos.tar.gz", "v1.0.0");
+        // Second overwrites first — only one entry per repo
+        assert_eq!(state.versions.len(), 1);
+        let cached = state.get_cached("owner/repo").unwrap();
+        assert_eq!(cached.asset, "foo-macos.tar.gz");
     }
 
     #[test]
@@ -205,13 +237,17 @@ mod tests {
         let _env = StatePathEnvGuard::set(&state_path);
 
         let mut state = State::default();
-        state.set_version("owner/repo", "v1.0.0");
-        state.set_version("other/repo", "v2.3.1");
+        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0");
+        state.set_cached("other/repo", "bar-macos.zip", "v2.3.1");
         state.save();
 
         let loaded = State::load();
-        assert_eq!(loaded.get_version("owner/repo"), Some("v1.0.0"));
-        assert_eq!(loaded.get_version("other/repo"), Some("v2.3.1"));
+        let a = loaded.get_cached("owner/repo").unwrap();
+        assert_eq!(a.tag, "v1.0.0");
+        assert_eq!(a.asset, "foo-linux.tar.gz");
+        let b = loaded.get_cached("other/repo").unwrap();
+        assert_eq!(b.tag, "v2.3.1");
+        assert_eq!(b.asset, "bar-macos.zip");
     }
 
     #[test]
@@ -229,10 +265,13 @@ mod tests {
     #[test]
     fn test_toml_format() {
         let mut state = State::default();
-        state.set_version("owner/repo", "v1.0.0");
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0");
         let content = toml::to_string_pretty(&state).unwrap();
-        assert!(content.contains("[versions]"));
-        assert!(content.contains("owner/repo"));
+        // serializes as nested table, e.g. ["versions"."owner/repo"]
+        assert!(content.contains("versions"));
+        assert!(content.contains("tag"));
+        assert!(content.contains("asset"));
+        assert!(content.contains("foo.tar.gz"));
         assert!(content.contains("v1.0.0"));
     }
 }

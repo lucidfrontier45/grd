@@ -34,17 +34,6 @@ fn main() -> Result<()> {
     let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;
     println!("Selected version: {}", release.tag_name);
 
-    if args.tag.is_none() && !args.force {
-        let cache = state::State::load();
-        let cache_hit = cache
-            .get_version(&args.repo)
-            .is_some_and(|cached| cached == release.tag_name);
-        if cache_hit {
-            println!("Already at latest version {}", release.tag_name);
-            return Ok(());
-        }
-    }
-
     let os = match &args.os {
         Some(s) => asset::normalize_os(s)?,
         None => env::consts::OS.to_string(),
@@ -74,13 +63,33 @@ fn main() -> Result<()> {
     })?;
     println!("Selected asset: {}", asset.name);
 
-    let bin_name = args.bin_name.unwrap_or_else(|| {
+    let bin_name = args.bin_name.clone().unwrap_or_else(|| {
         args.repo
             .split('/')
             .next_back()
             .unwrap_or("app")
             .to_string()
     });
+
+    if args.tag.is_none() && !args.force {
+        let target_path = if args.no_decompress {
+            args.destination.join(&asset.name)
+        } else if cfg!(windows) {
+            args.destination.join(format!("{}.exe", bin_name))
+        } else {
+            args.destination.join(&bin_name)
+        };
+        if target_path.exists() {
+            let cache = state::State::load();
+            let cache_hit = cache
+                .get_cached(&args.repo)
+                .is_some_and(|cached| cached.tag == release.tag_name && cached.asset == asset.name);
+            if cache_hit {
+                println!("Already at {} version {}", asset.name, release.tag_name);
+                return Ok(());
+            }
+        }
+    }
 
     let source = download::download_asset(&agent, &asset, args.memory_limit)?;
 
@@ -93,7 +102,7 @@ fn main() -> Result<()> {
     )?;
 
     let mut cache = state::State::load();
-    cache.set_version(&args.repo, &release.tag_name);
+    cache.set_cached(&args.repo, &asset.name, &release.tag_name);
     cache.save();
 
     println!(
