@@ -77,7 +77,10 @@ impl State {
             }
         };
 
-        let parent = path.parent().unwrap();
+        let Some(parent) = path.parent() else {
+            eprintln!("Warning: state file {:?} has no parent directory", path);
+            return;
+        };
         if let Err(e) = fs::create_dir_all(parent) {
             eprintln!(
                 "Warning: failed to create state directory {:?}: {}",

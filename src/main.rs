@@ -36,9 +36,10 @@ fn main() -> Result<()> {
 
     if args.tag.is_none() && !args.force {
         let cache = state::State::load();
-        if let Some(cached) = cache.get_version(&args.repo)
-            && cached == release.tag_name
-        {
+        let cache_hit = cache
+            .get_version(&args.repo)
+            .is_some_and(|cached| cached == release.tag_name);
+        if cache_hit {
             println!("Already at latest version {}", release.tag_name);
             return Ok(());
         }
