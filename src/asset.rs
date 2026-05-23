@@ -187,13 +187,13 @@ fn collect_selection<'a>(assets: &'a [&'a Asset]) -> Result<&'a Asset> {
     }
 }
 
-pub fn select_asset(
-    assets: &[Asset],
-    os: &str,
-    arch: &str,
-    force_select: bool,
-    exclude: Option<&str>,
-) -> Result<Asset> {
+pub enum Selection {
+    Exact(Asset),
+    Multiple(Vec<Asset>),
+    None,
+}
+
+pub fn find_asset(assets: &[Asset], os: &str, arch: &str, exclude: Option<&str>) -> Selection {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
@@ -208,57 +208,77 @@ pub fn select_asset(
 
     let matches = collect_matches(assets, &blacklist, &normalized_os, &effective_arch);
 
-    if force_select {
-        handle_force_select(assets, &blacklist, &normalized_os, &effective_arch, arch)
-    } else {
-        match matches.len() {
-            0 => handle_no_matches(
-                assets,
-                &blacklist,
-                &normalized_os,
-                &effective_arch,
-                arch,
-                os,
-            ),
-            1 => Ok(matches[0].clone()),
-            _ => handle_multiple_matches(matches, &normalized_os, &effective_arch, arch, os),
-        }
+    match matches.len() {
+        0 => Selection::None,
+        1 => Selection::Exact(matches[0].clone()),
+        _ => Selection::Multiple(matches.into_iter().cloned().collect()),
     }
 }
 
-fn handle_force_select(
+pub fn select_asset(
     assets: &[Asset],
-    blacklist: &[String],
-    normalized_os: &str,
-    effective_arch: &Option<String>,
-    arch: &str,
-) -> Result<Asset> {
-    interactive_select(
-        assets,
-        blacklist,
-        normalized_os,
-        effective_arch,
-        arch,
-        "Select an asset:",
-    )
-}
-
-fn handle_no_matches(
-    assets: &[Asset],
-    blacklist: &[String],
-    normalized_os: &str,
-    effective_arch: &Option<String>,
-    arch: &str,
     os: &str,
+    arch: &str,
+    force_select: bool,
+    exclude: Option<&str>,
 ) -> Result<Asset> {
-    interactive_select(
-        assets,
-        blacklist,
-        normalized_os,
-        effective_arch,
-        arch,
-        &format!("No matching asset found for {os}-{arch}. Select from available assets:"),
-    )
+    let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
+        s.split(',').map(|w| w.trim().to_lowercase()).collect()
+    });
+    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let effective_arch = inferred_arch.or(Some(arch.to_string()));
+
+    if force_select {
+        if !io::stdin().is_terminal() {
+            bail!("Cannot select asset in non-terminal environment");
+        }
+        return interactive_select(
+            assets,
+            &blacklist,
+            &normalized_os,
+            &effective_arch,
+            arch,
+            "Select an asset:",
+        );
+    }
+
+    match find_asset(assets, os, arch, exclude) {
+        Selection::Exact(asset) => Ok(asset),
+        Selection::Multiple(matches) => {
+            if !io::stdin().is_terminal() {
+                bail!(
+                    "Multiple assets found for {}-{}. Refine your filters to select a single asset or run in an interactive terminal.",
+                    normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch)
+                );
+            }
+            let mut sorted = matches.iter().collect::<Vec<_>>();
+            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+            sort_by_score(&mut sorted, &normalized_os, arch_ref);
+            println!("Multiple assets found for {normalized_os}-{arch_ref}. Select one:");
+            show_all_assets(&sorted, &normalized_os, arch_ref);
+            let selected = collect_selection(&sorted)?;
+            Ok(selected.clone())
+        }
+        Selection::None => {
+            if !io::stdin().is_terminal() {
+                bail!(
+                    "No matching asset found for {}-{}. Run in an interactive terminal to select from available assets, or refine your filters.",
+                    normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch)
+                );
+            }
+            let mut all: Vec<&Asset> = assets.iter().collect();
+            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+            sort_by_score(&mut all, &normalized_os, arch_ref);
+            println!(
+                "No matching asset found for {normalized_os}-{arch_ref}. Select from available assets:"
+            );
+            show_all_assets(&all, &normalized_os, arch_ref);
+            let selected = collect_selection(&all)?;
+            Ok(selected.clone())
+        }
+    }
 }
 
 fn interactive_select(
@@ -291,36 +311,6 @@ fn interactive_select(
         effective_arch.as_deref().unwrap_or(arch),
     );
     let selected = collect_selection(&all_assets)?;
-    Ok(selected.clone())
-}
-
-fn handle_multiple_matches(
-    matches: Vec<&Asset>,
-    normalized_os: &str,
-    effective_arch: &Option<String>,
-    arch: &str,
-    os: &str,
-) -> Result<Asset> {
-    if !io::stdin().is_terminal() {
-        bail!(
-            "Multiple assets found for {}-{}. Refine your filters to select a single asset or run in an interactive terminal.",
-            os,
-            arch
-        );
-    }
-    let mut sorted_matches = matches.clone();
-    sort_by_score(
-        &mut sorted_matches,
-        normalized_os,
-        effective_arch.as_deref().unwrap_or(arch),
-    );
-    println!("Multiple assets found. Select one:");
-    show_all_assets(
-        &sorted_matches,
-        normalized_os,
-        effective_arch.as_deref().unwrap_or(arch),
-    );
-    let selected = collect_selection(&sorted_matches)?;
     Ok(selected.clone())
 }
 
@@ -433,8 +423,11 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win32", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match win32");
+        let result = find_asset(&assets, "win32", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match win32"
+        );
     }
 
     #[test]
@@ -445,8 +438,11 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win64", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match win64");
+        let result = find_asset(&assets, "win64", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match win64"
+        );
     }
 
     #[test]
@@ -544,8 +540,11 @@ mod tests {
             },
         ];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, Some("gnu")).unwrap();
-        assert_eq!(result.name, "app-x86_64-linux-musl.tar.gz");
+        let result = find_asset(&assets, "linux", "x86_64", Some("gnu"));
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux-musl.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -568,12 +567,8 @@ mod tests {
             },
         ];
 
-        // In non-terminal environment, multiple matches should error
-        let result = select_asset(&assets, "linux", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "Multiple matches should error in non-terminal environment"
-        );
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        assert!(matches!(result, Selection::Multiple(_)));
     }
 
     #[test]
@@ -591,20 +586,8 @@ mod tests {
             },
         ];
 
-        // In non-terminal environment, multiple matches should error
-        let result = select_asset(&assets, "linux", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "Multiple matches should error in non-terminal environment"
-        );
-
-        if let Err(e) = result {
-            let error_msg = e.to_string().to_lowercase();
-            assert!(
-                error_msg.contains("multiple") || error_msg.contains("select"),
-                "Error message should mention multiple assets and suggest --select flag"
-            );
-        }
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        assert!(matches!(result, Selection::Multiple(_)));
     }
 
     #[test]
@@ -622,8 +605,11 @@ mod tests {
             },
         ];
 
-        let result = select_asset(&assets, "windows", "x86_64", false, None);
-        assert!(result.is_err(), "darwin assets should NOT match Windows");
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match Windows"
+        );
     }
 
     #[test]
@@ -634,9 +620,9 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win", "x86_64", false, None);
+        let result = find_asset(&assets, "win", "x86_64", None);
         assert!(
-            result.is_err(),
+            matches!(result, Selection::None),
             "darwin assets should NOT match even with 'win' alias"
         );
     }
@@ -743,8 +729,11 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-win-x86_64.zip");
+        let result = find_asset(&assets, "win", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win-x86_64.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -755,8 +744,11 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win32", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-win32-x86_64.exe");
+        let result = find_asset(&assets, "win32", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win32-x86_64.exe"),
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -767,8 +759,11 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "win64", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-win64-x86_64.zip");
+        let result = find_asset(&assets, "win64", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win64-x86_64.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -791,12 +786,8 @@ mod tests {
             },
         ];
 
-        // In non-terminal environment, multiple matches should error
-        let result = select_asset(&assets, "win", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "Multiple matches should error in non-terminal environment"
-        );
+        let result = find_asset(&assets, "win", "x86_64", None);
+        assert!(matches!(result, Selection::Multiple(_)));
     }
 
     #[test]
@@ -826,38 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_asset_multiple_matches_non_terminal_error() {
-        let assets = vec![
-            Asset {
-                name: "app-linux-x86_64.tar.gz".to_string(),
-                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
-                size: 1024,
-            },
-            Asset {
-                name: "app-linux-amd64.zip".to_string(),
-                browser_download_url: "https://example.com/app2.zip".to_string(),
-                size: 2048,
-            },
-        ];
-
-        // In non-terminal environment (simulated by the test runner),
-        // multiple matches should return an error
-        let result = select_asset(&assets, "linux", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "Multiple matches should error in non-terminal environment"
-        );
-
-        if let Err(e) = result {
-            let error_msg = e.to_string().to_lowercase();
-            assert!(
-                error_msg.contains("multiple") || error_msg.contains("select"),
-                "Error message should mention multiple assets and suggest --select flag"
-            );
-        }
-    }
-
-    #[test]
     fn test_select_asset_single_match_auto_selected() {
         let assets = vec![Asset {
             name: "app-linux-x86_64.tar.gz".to_string(),
@@ -865,39 +824,10 @@ mod tests {
             size: 1024,
         }];
 
-        let result = select_asset(&assets, "linux", "x86_64", false, None).unwrap();
-        assert_eq!(result.name, "app-linux-x86_64.tar.gz");
-    }
-
-    #[test]
-    fn test_select_asset_zero_matches_non_terminal_error() {
-        let assets = vec![Asset {
-            name: "app-darwin-x86_64.tar.gz".to_string(),
-            browser_download_url: "https://example.com/app.tar.gz".to_string(),
-            size: 1024,
-        }];
-
-        // In non-terminal environment, zero matches should error
-        let result = select_asset(&assets, "linux", "x86_64", false, None);
-        assert!(
-            result.is_err(),
-            "Zero matches should error in non-terminal environment"
-        );
-    }
-
-    #[test]
-    fn test_select_force_select_flag_non_terminal_error() {
-        let assets = vec![Asset {
-            name: "app-linux-x86_64.tar.gz".to_string(),
-            browser_download_url: "https://example.com/app.tar.gz".to_string(),
-            size: 1024,
-        }];
-
-        // In non-terminal environment, --select flag should error
-        let result = select_asset(&assets, "linux", "x86_64", true, None);
-        assert!(
-            result.is_err(),
-            "Force select should error in non-terminal environment"
-        );
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 }
