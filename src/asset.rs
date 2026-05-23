@@ -226,7 +226,14 @@ pub fn select_asset(
         if !io::stdin().is_terminal() {
             bail!("Cannot select asset in non-terminal environment");
         }
-        return interactive_select(assets, &[], os, &Some(arch.to_string()), arch, "Select an asset:");
+        return interactive_select(
+            assets,
+            &[],
+            os,
+            &Some(arch.to_string()),
+            arch,
+            "Select an asset:",
+        );
     }
 
     match find_asset(assets, os, arch, exclude) {
@@ -248,9 +255,7 @@ pub fn select_asset(
         }
         Selection::None => {
             if !io::stdin().is_terminal() {
-                bail!(
-                    "No matching asset found for {os}-{arch}. Select from available assets:"
-                );
+                bail!("No matching asset found for {os}-{arch}. Select from available assets:");
             }
             let mut all: Vec<&Asset> = assets.iter().collect();
             sort_by_score(&mut all, os, arch);
@@ -405,7 +410,10 @@ mod tests {
         }];
 
         let result = find_asset(&assets, "win32", "x86_64", None);
-        assert!(matches!(result, Selection::None), "darwin assets should NOT match win32");
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match win32"
+        );
     }
 
     #[test]
@@ -417,7 +425,10 @@ mod tests {
         }];
 
         let result = find_asset(&assets, "win64", "x86_64", None);
-        assert!(matches!(result, Selection::None), "darwin assets should NOT match win64");
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match win64"
+        );
     }
 
     #[test]
@@ -581,7 +592,10 @@ mod tests {
         ];
 
         let result = find_asset(&assets, "windows", "x86_64", None);
-        assert!(matches!(result, Selection::None), "darwin assets should NOT match Windows");
+        assert!(
+            matches!(result, Selection::None),
+            "darwin assets should NOT match Windows"
+        );
     }
 
     #[test]

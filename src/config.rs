@@ -106,8 +106,10 @@ mod tests {
 
     #[test]
     fn test_token_set_in_http_request() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+        };
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

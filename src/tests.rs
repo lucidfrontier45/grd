@@ -3,7 +3,7 @@ use std::env;
 use tempfile::TempDir;
 
 use crate::{
-    asset::{find_asset, Selection},
+    asset::{Selection, find_asset},
     config::{configure_agent, get_auth_token},
     download::download_asset,
     extract::extract_and_save,
