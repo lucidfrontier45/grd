@@ -1,6 +1,6 @@
 [package]
 name = "grd"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["杜世橋 Du Shiqiao <lucidfrontier.45@gmail.com>"]
 description = "A command-line tool to download and install binaries from GitHub releases."
@@ -22,7 +22,7 @@ tar = "0.4.44"
 toml = "0.8"
 tempfile = "3.24"
 ureq = { version = "3.1.4", features = ["rustls", "json"] }
-zip = "7.1.0"
+zip = "8.6.0"
 
 [dev-dependencies]
 serde_json = "1.0"
