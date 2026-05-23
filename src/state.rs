@@ -132,6 +132,9 @@ mod tests {
             let previous = env::var("GRD_STATE_PATH").ok();
 
             unsafe {
+                // Safety: the mutex guard held in this helper serializes access to
+                // GRD_STATE_PATH across tests, so mutating the process environment
+                // here cannot race with other test code using the same variable.
                 env::set_var("GRD_STATE_PATH", state_path);
             }
 
@@ -146,9 +149,13 @@ mod tests {
         fn drop(&mut self) {
             match &self.previous {
                 Some(previous) => unsafe {
+                    // Safety: this guard still holds the mutex acquired in `set`,
+                    // so restoring the environment variable remains serialized.
                     env::set_var("GRD_STATE_PATH", previous);
                 },
                 None => unsafe {
+                    // Safety: this guard still holds the mutex acquired in `set`,
+                    // so removing the environment variable remains serialized.
                     env::remove_var("GRD_STATE_PATH");
                 },
             }
