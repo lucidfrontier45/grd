@@ -92,11 +92,9 @@ fn main() -> Result<()> {
         args.no_decompress,
     )?;
 
-    if !args.list && !args.list_platforms {
-        let mut cache = state::State::load();
-        cache.set_version(&args.repo, &release.tag_name);
-        cache.save();
-    }
+    let mut cache = state::State::load();
+    cache.set_version(&args.repo, &release.tag_name);
+    cache.save();
 
     println!(
         "Successfully installed '{}' to {:?}",
