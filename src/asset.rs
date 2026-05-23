@@ -222,15 +222,21 @@ pub fn select_asset(
     force_select: bool,
     exclude: Option<&str>,
 ) -> Result<Asset> {
+    let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
+        s.split(',').map(|w| w.trim().to_lowercase()).collect()
+    });
+    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let effective_arch = inferred_arch.or(Some(arch.to_string()));
+
     if force_select {
         if !io::stdin().is_terminal() {
             bail!("Cannot select asset in non-terminal environment");
         }
         return interactive_select(
             assets,
-            &[],
-            os,
-            &Some(arch.to_string()),
+            &blacklist,
+            &normalized_os,
+            &effective_arch,
             arch,
             "Select an asset:",
         );
@@ -242,25 +248,33 @@ pub fn select_asset(
             if !io::stdin().is_terminal() {
                 bail!(
                     "Multiple assets found for {}-{}. Refine your filters to select a single asset or run in an interactive terminal.",
-                    os,
-                    arch
+                    normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch)
                 );
             }
             let mut sorted = matches.iter().collect::<Vec<_>>();
-            sort_by_score(&mut sorted, os, arch);
-            println!("Multiple assets found. Select one:");
-            show_all_assets(&sorted, os, arch);
+            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+            sort_by_score(&mut sorted, &normalized_os, arch_ref);
+            println!("Multiple assets found for {normalized_os}-{arch_ref}. Select one:");
+            show_all_assets(&sorted, &normalized_os, arch_ref);
             let selected = collect_selection(&sorted)?;
             Ok(selected.clone())
         }
         Selection::None => {
             if !io::stdin().is_terminal() {
-                bail!("No matching asset found for {os}-{arch}. Select from available assets:");
+                bail!(
+                    "No matching asset found for {}-{}. Run in an interactive terminal to select from available assets, or refine your filters.",
+                    normalized_os,
+                    effective_arch.as_deref().unwrap_or(arch)
+                );
             }
             let mut all: Vec<&Asset> = assets.iter().collect();
-            sort_by_score(&mut all, os, arch);
-            println!("No matching asset found for {os}-{arch}. Select from available assets:");
-            show_all_assets(&all, os, arch);
+            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+            sort_by_score(&mut all, &normalized_os, arch_ref);
+            println!(
+                "No matching asset found for {normalized_os}-{arch_ref}. Select from available assets:"
+            );
+            show_all_assets(&all, &normalized_os, arch_ref);
             let selected = collect_selection(&all)?;
             Ok(selected.clone())
         }
