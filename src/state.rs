@@ -111,6 +111,46 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct StatePathEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<String>,
+    }
+
+    impl StatePathEnvGuard {
+        fn set(state_path: &std::path::Path) -> Self {
+            let lock = env_lock().lock().unwrap();
+            let previous = env::var("GRD_STATE_PATH").ok();
+
+            unsafe {
+                env::set_var("GRD_STATE_PATH", state_path);
+            }
+
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for StatePathEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => unsafe {
+                    env::set_var("GRD_STATE_PATH", previous);
+                },
+                None => unsafe {
+                    env::remove_var("GRD_STATE_PATH");
+                },
+            }
+        }
+    }
 
     #[test]
     fn test_state_default_is_empty() {
@@ -152,10 +192,7 @@ mod tests {
     fn test_save_and_load_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
         let state_path = dir.path().join("state.toml");
-
-        unsafe {
-            env::set_var("GRD_STATE_PATH", state_path.to_str().unwrap());
-        }
+        let _env = StatePathEnvGuard::set(&state_path);
 
         let mut state = State::default();
         state.set_version("owner/repo", "v1.0.0");
@@ -165,10 +202,18 @@ mod tests {
         let loaded = State::load();
         assert_eq!(loaded.get_version("owner/repo"), Some("v1.0.0"));
         assert_eq!(loaded.get_version("other/repo"), Some("v2.3.1"));
+    }
 
-        unsafe {
-            env::remove_var("GRD_STATE_PATH");
-        }
+    #[test]
+    fn test_load_returns_default_for_corrupt_state_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        fs::write(&state_path, "not = [valid toml").unwrap();
+
+        let loaded = State::load();
+        assert!(loaded.versions.is_empty());
     }
 
     #[test]

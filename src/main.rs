@@ -28,6 +28,7 @@ fn main() -> Result<()> {
         for rel in releases {
             println!("  - {}", rel.tag_name);
         }
+        return Ok(());
     }
 
     let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;

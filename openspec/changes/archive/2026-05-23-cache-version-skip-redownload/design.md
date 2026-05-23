@@ -49,5 +49,5 @@
 ## Risks / Trade-offs
 
 - **Race condition**: if `grd` is killed between state read and download completion, next run will re-download. Acceptable for CLI tool. Acceptable.
-- **HOME unset**: crash on state file path construction. Mitigation: print clear error ("Set HOME or USERPROFILE env var"), exit 1.
+- **HOME unset**: state path cannot be constructed. Mitigation: print a warning and proceed without cache persistence for that run.
 - **`toml` dep**: adds a compile-time dependency. Trade-off for human-readable state file vs rolling custom parser.
