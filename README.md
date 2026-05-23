@@ -114,6 +114,25 @@ grd owner/repo --no-decompress
 - Larger downloads use temporary files to avoid excessive memory consumption.
 - The default limit is 100MB, but can be adjusted with `--memory-limit`.
 
+## Version Cache
+
+To avoid redundant downloads, `grd` caches the last-downloaded release version per
+repository in `~/.grd/state.toml`:
+
+- **When checked**: On every run *without* `--tag` or `--force`.
+- **Conditions for a hit**: The target binary already exists on disk **and** the
+  cached release tag **and** asset name both match the latest release from GitHub.
+- **On hit**: Prints `Already at <asset> version <tag>` and exits without downloading.
+- **On miss or not checked**: Proceeds to download, then updates the cache.
+- **Bypass**: Use `--force` to skip the cache and force a fresh download.
+- **Fault-tolerant**: A missing, corrupt, or unwritable cache file never blocks the
+  download — warnings are printed to stderr and execution continues.
+- **Format**: TOML keyed by `"owner/repo"`:
+  ```toml
+  [versions]
+  "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz" }
+  ```
+
 ## Options
 
 - `repo`: GitHub repository (owner/repo)
