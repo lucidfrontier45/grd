@@ -3,7 +3,7 @@ use std::env;
 use tempfile::TempDir;
 
 use crate::{
-    asset::select_asset,
+    asset::{find_asset, Selection},
     config::{configure_agent, get_auth_token},
     download::download_asset,
     extract::extract_and_save,
@@ -20,11 +20,10 @@ fn test_select_asset_from_real_repo() {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    let result = select_asset(&release.assets, os, arch, false, None);
-    // In non-terminal environment, multiple matches should error
-    match result {
-        Ok(selected) => println!("Selected asset for {}-{}: {}", os, arch, selected.name),
-        Err(e) => println!("No unique match for {}-{}: {}", os, arch, e),
+    match find_asset(&release.assets, os, arch, None) {
+        Selection::Exact(asset) => println!("Selected asset for {}-{}: {}", os, arch, asset.name),
+        Selection::Multiple(matches) => println!("{} matches for {}-{}", matches.len(), os, arch),
+        Selection::None => println!("No match for {}-{}", os, arch),
     }
 }
 
@@ -38,11 +37,11 @@ fn test_integration_download_extract_save() {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    // Skip if multiple matches (non-terminal environment)
-    let asset = match select_asset(&release.assets, os, arch, false, None) {
-        Ok(a) => a,
-        Err(_) => {
-            println!("Skipping test: multiple assets found for {}-{}", os, arch);
+    // Skip if multiple or no matches
+    let asset = match find_asset(&release.assets, os, arch, None) {
+        Selection::Exact(a) => a,
+        _ => {
+            println!("Skipping test: no unique match for {}-{}", os, arch);
             return;
         }
     };
