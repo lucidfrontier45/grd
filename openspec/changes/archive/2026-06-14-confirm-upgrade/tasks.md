@@ -15,5 +15,5 @@
 
 ## 4. Tests
 
-- [ ] 4.1 Add CLI test for `--yes` flag parsing
+- [x] 4.1 Add CLI test for `--yes` flag parsing
 - [x] 4.2 Add integration test for confirmation flow
