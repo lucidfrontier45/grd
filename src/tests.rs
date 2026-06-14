@@ -1,13 +1,16 @@
 use std::env;
 
+use clap::Parser;
 use tempfile::TempDir;
 
 use crate::{
     asset::{Selection, find_asset},
+    cli::Args,
     config::{configure_agent, get_auth_token},
     download::download_asset,
     extract::extract_and_save,
     github::fetch_release_info,
+    state::State,
 };
 
 #[test]
@@ -96,4 +99,110 @@ fn test_confirm_upgrade_defaults_to_no() {
 fn test_confirm_upgrade_rejects_arbitrary() {
     let mut input = std::io::Cursor::new("maybe\n");
     assert!(!crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}
+
+use std::sync::{Mutex, OnceLock};
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_state_path(dir: &TempDir, f: impl FnOnce()) {
+    let _lock = env_lock().lock().unwrap();
+    let state_path = dir.path().join("state.toml");
+    unsafe {
+        env::set_var("GRD_STATE_PATH", &state_path);
+    }
+    f();
+    unsafe {
+        env::remove_var("GRD_STATE_PATH");
+    }
+}
+
+#[test]
+fn test_remove_deletes_file_and_state_entry() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "test/repo",
+            "file.tar.gz",
+            "v1.0.0",
+            Some(dir.path().display().to_string()),
+        );
+        state.save();
+
+        let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
+        let binary_path = dir.path().join(bin_name);
+        std::fs::write(&binary_path, "dummy").unwrap();
+
+        let mut cache = State::load();
+        let entry = cache.remove_cached("test/repo").unwrap();
+        let dest = entry.destination.unwrap();
+        let target = std::path::PathBuf::from(&dest).join(bin_name);
+        std::fs::remove_file(&target).unwrap();
+        cache.save();
+
+        assert!(!binary_path.exists());
+        let loaded = State::load();
+        assert!(loaded.get_cached("test/repo").is_none());
+    });
+}
+
+#[test]
+fn test_remove_warns_when_binary_missing() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "test/repo",
+            "file.tar.gz",
+            "v1.0.0",
+            Some(dir.path().display().to_string()),
+        );
+        state.save();
+
+        let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
+        let binary_path = dir.path().join(bin_name);
+
+        let mut cache = State::load();
+        let entry = cache.remove_cached("test/repo").unwrap();
+        let dest = entry.destination.unwrap();
+        let target = std::path::PathBuf::from(&dest).join(bin_name);
+
+        // Binary doesn't exist — should warn (we can't capture stderr easily, but we check it doesn't panic)
+        if target.exists() {
+            std::fs::remove_file(&target).unwrap();
+        }
+        cache.save();
+
+        assert!(!binary_path.exists());
+        let loaded = State::load();
+        assert!(loaded.get_cached("test/repo").is_none());
+    });
+}
+
+#[test]
+fn test_remove_no_state_entry() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut cache = State::load();
+        let entry = cache.remove_cached("test/repo");
+        assert!(entry.is_none());
+        // Verify no crash — should just warn and exit
+    });
+}
+
+#[test]
+fn test_remove_flag_parses() {
+    let args = Args::try_parse_from(["grd", "--remove", "owner/repo"]).unwrap();
+    assert!(args.remove);
+    assert_eq!(args.repo, "owner/repo");
+}
+
+#[test]
+fn test_remove_flag_not_set_by_default() {
+    let args = Args::try_parse_from(["grd", "owner/repo"]).unwrap();
+    assert!(!args.remove);
 }

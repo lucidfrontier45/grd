@@ -106,6 +106,12 @@ Download without decompressing/extracting:
 grd owner/repo --no-decompress
 ```
 
+Remove a previously downloaded binary and its state cache entry:
+
+```bash
+grd owner/repo --remove
+```
+
 
 
 ## Memory Usage
@@ -144,6 +150,7 @@ repository in `~/.grd/state.toml`:
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
+- `--remove`: Remove the downloaded binary and its state cache entry for the given repository.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
 - `--arch`: Target architecture (x86_64, aarch64, amd64, x64, arm64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64.
 
