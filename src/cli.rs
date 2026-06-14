@@ -10,9 +10,6 @@ pub struct Args {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    #[arg(long)]
-    pub list_installed: bool,
-
     #[arg(short, long)]
     pub tag: Option<String>,
 
@@ -48,9 +45,6 @@ pub struct Args {
 
     #[arg(long)]
     pub arch: Option<String>,
-
-    #[arg(long)]
-    pub list_platforms: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -65,6 +59,10 @@ pub enum Command {
         /// Repository name (e.g., owner/repo)
         repo: String,
     },
+    /// List installed packages
+    ListInstalled,
+    /// List supported platforms
+    ListPlatform,
 }
 
 #[cfg(test)]
@@ -102,23 +100,17 @@ mod tests {
     }
 
     #[test]
-    fn test_list_installed_flag_parses() {
-        let args = Args::parse_from(["grd", "--list-installed"]);
-        assert!(args.list_installed);
-        assert!(args.repo.is_none());
+    fn test_list_installed_subcommand_parses() {
+        let args = Args::parse_from(["grd", "list-installed"]);
+        assert!(args.command.is_some());
+        assert!(matches!(args.command, Some(Command::ListInstalled)));
     }
 
     #[test]
-    fn test_list_installed_defaults_to_false() {
-        let args = Args::parse_from(["grd", "owner/repo"]);
-        assert!(!args.list_installed);
-    }
-
-    #[test]
-    fn test_list_installed_with_repo_parses_but_repo_present() {
-        let args = Args::parse_from(["grd", "--list-installed", "owner/repo"]);
-        assert!(args.list_installed);
-        assert_eq!(args.repo.as_deref(), Some("owner/repo"));
+    fn test_list_platform_subcommand_parses() {
+        let args = Args::parse_from(["grd", "list-platform"]);
+        assert!(args.command.is_some());
+        assert!(matches!(args.command, Some(Command::ListPlatform)));
     }
 
     #[test]

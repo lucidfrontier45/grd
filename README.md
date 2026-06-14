@@ -60,7 +60,41 @@ GITHUB_PAT=your_token_here
 
 The `GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
 
-### Basic Commands
+## Subcommands
+
+### `register`
+
+Set a default install directory for future downloads (persisted in state cache):
+
+```bash
+grd register /usr/local/bin
+```
+
+### `remove`
+
+Remove an installed package and its state cache entry:
+
+```bash
+grd remove owner/repo
+```
+
+### `list-installed`
+
+List all previously installed packages (from cache):
+
+```bash
+grd list-installed
+```
+
+### `list-platform`
+
+List supported platform targets (OS/arch combinations):
+
+```bash
+grd list-platform
+```
+
+## Basic Commands
 
 Download the latest release of a repository:
 
@@ -83,7 +117,13 @@ grd owner/repo --list
 List all previously installed packages (from cache):
 
 ```bash
-grd --list-installed
+grd list-installed
+```
+
+List supported platform targets:
+
+```bash
+grd list-platform
 ```
 
 Specify destination directory:
@@ -110,12 +150,6 @@ Download without decompressing/extracting:
 
 ```bash
 grd owner/repo --no-decompress
-```
-
-Remove a previously downloaded binary and its state cache entry:
-
-```bash
-grd owner/repo --remove
 ```
 
 
@@ -149,7 +183,8 @@ repository in `~/.grd/state.toml`:
 
 - `repo`: GitHub repository (owner/repo)
 - `--tag`: Specific version tag (defaults to latest)
-- `--list-installed`: List all previously downloaded releases from the local cache
+- `list-installed`: List all previously downloaded releases from the local cache
+- `list-platform`: Display supported OS/architecture combinations
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
 - `--bin-name`: Override executable name
@@ -157,7 +192,8 @@ repository in `~/.grd/state.toml`:
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
-- `--remove`: Remove the downloaded binary and its state cache entry for the given repository.
+- `--force`: Skip the version cache check and force a fresh download.
+- `-y / --yes`: Skip the upgrade confirmation prompt.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
 - `--arch`: Target architecture (x86_64, aarch64, amd64, x64, arm64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64.
 

@@ -49,33 +49,28 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        None => {}
-    }
-
-    if args.list_installed {
-        if let Some(repo) = &args.repo {
-            bail!("--list-installed does not accept a repo argument: {repo}");
-        }
-        let cache = state::State::load();
-        if cache.versions.is_empty() {
-            println!("No installed packages found.");
-        } else {
-            for (repo, release) in &cache.versions {
-                println!("{} (tag: {}, asset: {})", repo, release.tag, release.asset);
+        Some(Command::ListInstalled) => {
+            let cache = state::State::load();
+            if cache.versions.is_empty() {
+                println!("No installed packages found.");
+            } else {
+                for (repo, release) in &cache.versions {
+                    println!("{} (tag: {}, asset: {})", repo, release.tag, release.asset);
+                }
             }
+            return Ok(());
         }
-        return Ok(());
-    }
-
-    if args.list_platforms {
-        println!("Supported platforms:");
-        println!("  - windows-x86_64");
-        println!("  - windows-aarch64");
-        println!("  - macos-x86_64");
-        println!("  - macos-aarch64");
-        println!("  - linux-x86_64");
-        println!("  - linux-aarch64");
-        return Ok(());
+        Some(Command::ListPlatform) => {
+            println!("Supported platforms:");
+            println!("  - windows-x86_64");
+            println!("  - windows-aarch64");
+            println!("  - macos-x86_64");
+            println!("  - macos-aarch64");
+            println!("  - linux-x86_64");
+            println!("  - linux-aarch64");
+            return Ok(());
+        }
+        None => {}
     }
 
     let dest = match &args.destination {
