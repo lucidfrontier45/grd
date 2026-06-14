@@ -64,7 +64,9 @@ fn infer_architecture_from_platform(platform: &str) -> Option<String> {
 pub fn normalize_os(input: &str) -> Result<String> {
     let normalized = input.to_lowercase();
     match normalized.as_str() {
-        "windows" | "macos" | "linux" => Ok(normalized),
+        "windows" | "win32" | "win64" => Ok("windows".to_string()),
+        "macos" => Ok("macos".to_string()),
+        "linux" => Ok("linux".to_string()),
         _ => bail!("Invalid OS '{}'. Supported: windows, macos, linux", input),
     }
 }
@@ -103,7 +105,7 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
     };
 
     let arch_patterns = match target_arch {
-        "x86_64" => vec!["x86_64", "amd64", "x64"],
+        "x86_64" => vec!["x86_64", "amd64", "x64", "win64"],
         "aarch64" => vec!["aarch64", "arm64"],
         _ => vec![],
     };
@@ -187,6 +189,7 @@ fn collect_selection<'a>(assets: &'a [&'a Asset]) -> Result<&'a Asset> {
     }
 }
 
+#[derive(Debug)]
 pub enum Selection {
     Exact(Asset),
     Multiple(Vec<Asset>),
@@ -207,6 +210,20 @@ pub fn find_asset(assets: &[Asset], os: &str, arch: &str, exclude: Option<&str>)
     };
 
     let matches = collect_matches(assets, &blacklist, &normalized_os, &effective_arch);
+
+    if matches.len() > 1
+        && normalized_os == "windows"
+        && effective_arch.as_deref() == Some("x86_64")
+    {
+        let win64: Vec<&Asset> = matches
+            .iter()
+            .filter(|a| a.name.to_lowercase().contains("win64"))
+            .cloned()
+            .collect();
+        if win64.len() == 1 {
+            return Selection::Exact(win64[0].clone());
+        }
+    }
 
     match matches.len() {
         0 => Selection::None,
@@ -344,7 +361,11 @@ fn collect_matches<'a>(
             };
             let arch_match = match effective_arch.as_deref() {
                 Some("x86_64") => {
-                    name.contains("x86_64") || name.contains("amd64") || name.contains("x64")
+                    name.contains("x86_64")
+                        || name.contains("amd64")
+                        || name.contains("x64")
+                        || (normalized_os == "windows" && name.contains("win64"))
+                        || (normalized_os == "windows" && name.contains("win32"))
                 }
                 Some("aarch64") => name.contains("aarch64") || name.contains("arm64"),
                 _ => false,
@@ -787,7 +808,10 @@ mod tests {
         ];
 
         let result = find_asset(&assets, "win", "x86_64", None);
-        assert!(matches!(result, Selection::Multiple(_)));
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win64-x86_64.zip"),
+            _ => panic!("Expected Selection::Exact with win64, got Multiple"),
+        }
     }
 
     #[test]
@@ -829,5 +853,69 @@ mod tests {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
         }
+    }
+
+    #[test]
+    fn test_select_asset_windows_win64_preferred_over_win32() {
+        let assets = vec![
+            Asset {
+                name: "upx-4.2.4-win32.zip".to_string(),
+                browser_download_url: "https://example.com/upx32.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "upx-4.2.4-win64.zip".to_string(),
+                browser_download_url: "https://example.com/upx64.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win64.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_windows_win32_fallback_when_only_win32() {
+        let assets = vec![Asset {
+            name: "upx-4.2.4-win32.zip".to_string(),
+            browser_download_url: "https://example.com/upx32.zip".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win32.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_windows_win64_without_arch_string() {
+        let assets = vec![Asset {
+            name: "upx-4.2.4-win64.zip".to_string(),
+            browser_download_url: "https://example.com/upx.zip".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win64.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_normalize_os_win32() {
+        let result = normalize_os("win32").unwrap();
+        assert_eq!(result, "windows");
+    }
+
+    #[test]
+    fn test_normalize_os_win64() {
+        let result = normalize_os("win64").unwrap();
+        assert_eq!(result, "windows");
     }
 }
