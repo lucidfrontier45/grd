@@ -1,11 +1,14 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "GitHub Release Downloader")]
 pub struct Args {
     pub repo: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
     #[arg(long)]
     pub list_installed: bool,
@@ -16,8 +19,8 @@ pub struct Args {
     #[arg(short, long)]
     pub list: bool,
 
-    #[arg(short, long, default_value = ".")]
-    pub destination: PathBuf,
+    #[arg(short, long)]
+    pub destination: Option<PathBuf>,
 
     #[arg(short, long)]
     pub bin_name: Option<String>,
@@ -48,9 +51,20 @@ pub struct Args {
 
     #[arg(long)]
     pub list_platforms: bool,
+}
 
-    #[arg(long)]
-    pub remove: bool,
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Register a default install directory for future downloads
+    Register {
+        /// Default installation path
+        path: PathBuf,
+    },
+    /// Remove an installed package
+    Remove {
+        /// Repository name (e.g., owner/repo)
+        repo: String,
+    },
 }
 
 #[cfg(test)]
@@ -105,5 +119,34 @@ mod tests {
         let args = Args::parse_from(["grd", "--list-installed", "owner/repo"]);
         assert!(args.list_installed);
         assert_eq!(args.repo.as_deref(), Some("owner/repo"));
+    }
+
+    #[test]
+    fn test_register_subcommand_parses() {
+        let args = Args::parse_from(["grd", "register", "/usr/local/bin"]);
+        assert!(args.repo.is_none());
+        assert!(args.command.is_some());
+        let Command::Register { path } = args.command.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(path, PathBuf::from("/usr/local/bin"));
+    }
+
+    #[test]
+    fn test_register_subcommand_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn test_destination_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.destination.is_none());
+    }
+
+    #[test]
+    fn test_destination_flag_parses() {
+        let args = Args::parse_from(["grd", "owner/repo", "-d", "/tmp"]);
+        assert_eq!(args.destination, Some(PathBuf::from("/tmp")));
     }
 }

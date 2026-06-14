@@ -1,11 +1,56 @@
 use std::{env, fs, io::IsTerminal, path::PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
-use grd::{asset, cli::Args, config, confirm_upgrade, download, extract, github, state};
+use grd::{
+    asset,
+    cli::{Args, Command},
+    config, confirm_upgrade, download, extract, github, state,
+};
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    match &args.command {
+        Some(Command::Register { path }) => {
+            let mut cache = state::State::load();
+            let path_str = path.display().to_string();
+            cache.set_default_install_dir(&path_str);
+            cache.save();
+            println!("Default install directory set to: {}", path.display());
+            return Ok(());
+        }
+        Some(Command::Remove { repo }) => {
+            let mut cache = state::State::load();
+            if let Some(entry) = cache.remove_cached(repo) {
+                let bin_name = repo.split('/').next_back().unwrap_or("app");
+                let filename = if cfg!(windows) {
+                    format!("{}.exe", bin_name)
+                } else {
+                    bin_name.to_string()
+                };
+
+                let dest = entry.destination.as_deref().unwrap_or(".");
+                let target_path = PathBuf::from(dest).join(&filename);
+
+                if target_path.exists() {
+                    fs::remove_file(&target_path)?;
+                    println!("Removed '{}'", bin_name);
+                } else {
+                    eprintln!("Warning: binary not found at {:?}", target_path);
+                }
+
+                cache.save();
+            } else {
+                eprintln!(
+                    "Warning: no cached entry found for '{}' — nothing to remove.",
+                    repo
+                );
+            }
+            return Ok(());
+        }
+        None => {}
+    }
 
     if args.list_installed {
         if let Some(repo) = &args.repo {
@@ -22,39 +67,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if args.remove {
-        let Some(repo) = &args.repo else {
-            bail!("a repo argument is required for --remove");
-        };
-        let mut cache = state::State::load();
-        if let Some(entry) = cache.remove_cached(repo) {
-            let bin_name = repo.split('/').next_back().unwrap_or("app");
-            let filename = if cfg!(windows) {
-                format!("{}.exe", bin_name)
-            } else {
-                bin_name.to_string()
-            };
-
-            let dest = entry.destination.as_deref().unwrap_or(".");
-            let target_path = PathBuf::from(dest).join(&filename);
-
-            if target_path.exists() {
-                fs::remove_file(&target_path)?;
-                println!("Removed '{}'", bin_name);
-            } else {
-                eprintln!("Warning: binary not found at {:?}", target_path);
-            }
-
-            cache.save();
-        } else {
-            eprintln!(
-                "Warning: no cached entry found for '{}' — nothing to remove.",
-                repo
-            );
-        }
-        return Ok(());
-    }
-
     if args.list_platforms {
         println!("Supported platforms:");
         println!("  - windows-x86_64");
@@ -65,6 +77,15 @@ fn main() -> Result<()> {
         println!("  - linux-aarch64");
         return Ok(());
     }
+
+    let dest = match &args.destination {
+        Some(d) => d.clone(),
+        None => state::State::load()
+            .get_default_install_dir()
+            .map(PathBuf::from)
+            .unwrap_or_else(state::State::default_install_path),
+    };
+    fs::create_dir_all(&dest).context("Failed to create destination directory")?;
 
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
     let token = config::get_auth_token();
@@ -122,11 +143,11 @@ fn main() -> Result<()> {
 
     if args.tag.is_none() && !args.force {
         let target_path = if args.no_decompress {
-            args.destination.join(&asset.name)
+            dest.join(&asset.name)
         } else if cfg!(windows) {
-            args.destination.join(format!("{}.exe", bin_name))
+            dest.join(format!("{}.exe", bin_name))
         } else {
-            args.destination.join(&bin_name)
+            dest.join(&bin_name)
         };
         if target_path.exists() {
             let cache = state::State::load();
@@ -155,26 +176,17 @@ fn main() -> Result<()> {
 
     let source = download::download_asset(&agent, &asset, args.memory_limit)?;
 
-    extract::extract_and_save(
-        source,
-        &asset.name,
-        &bin_name,
-        &args.destination,
-        args.no_decompress,
-    )?;
+    extract::extract_and_save(source, &asset.name, &bin_name, &dest, args.no_decompress)?;
 
     let mut cache = state::State::load();
     cache.set_cached(
         repo,
         &asset.name,
         &release.tag_name,
-        Some(args.destination.display().to_string()),
+        Some(dest.display().to_string()),
     );
     cache.save();
 
-    println!(
-        "Successfully installed '{}' to {:?}",
-        bin_name, args.destination
-    );
+    println!("Successfully installed '{}' to {:?}", bin_name, dest);
     Ok(())
 }

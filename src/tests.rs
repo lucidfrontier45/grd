@@ -1,11 +1,11 @@
-use std::env;
+use std::{env, path::PathBuf};
 
 use clap::Parser;
 use tempfile::TempDir;
 
 use crate::{
     asset::{Selection, find_asset},
-    cli::Args,
+    cli::{Args, Command},
     config::{configure_agent, get_auth_token},
     download::download_asset,
     extract::extract_and_save,
@@ -195,16 +195,19 @@ fn test_remove_no_state_entry() {
 }
 
 #[test]
-fn test_remove_flag_parses() {
-    let args = Args::try_parse_from(["grd", "--remove", "owner/repo"]).unwrap();
-    assert!(args.remove);
-    assert_eq!(args.repo.as_deref(), Some("owner/repo"));
+fn test_remove_subcommand_parses() {
+    let args = Args::try_parse_from(["grd", "remove", "owner/repo"]).unwrap();
+    assert!(args.command.is_some());
+    let Command::Remove { repo } = args.command.unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(repo, "owner/repo");
 }
 
 #[test]
-fn test_remove_flag_not_set_by_default() {
+fn test_remove_subcommand_not_set_by_default() {
     let args = Args::try_parse_from(["grd", "owner/repo"]).unwrap();
-    assert!(!args.remove);
+    assert!(args.command.is_none());
 }
 
 #[test]
@@ -235,6 +238,61 @@ fn test_list_installed_empty_state() {
     with_state_path(&dir, || {
         let cache = State::load();
         assert!(cache.versions.is_empty());
+    });
+}
+
+#[test]
+fn test_register_subcommand_persists_to_state() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        // Simulate what main.rs does on "grd register /custom/path"
+        let mut state = State::default();
+        state.set_default_install_dir("/custom/path");
+        state.save();
+
+        let loaded = State::load();
+        assert_eq!(loaded.get_default_install_dir(), Some("/custom/path"));
+    });
+}
+
+#[test]
+fn test_destination_falls_back_to_registered_dir() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_default_install_dir("/registered/path");
+        state.save();
+
+        // When --destination is None, the fallback logic should pick up the registered dir
+        let dest = None::<std::path::PathBuf>;
+        let resolved = match dest {
+            Some(d) => d,
+            None => State::load()
+                .get_default_install_dir()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
+        assert_eq!(resolved, PathBuf::from("/registered/path"));
+    });
+}
+
+#[test]
+fn test_destination_falls_back_to_default_install_path_when_no_registered_dir() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let state = State::load();
+        assert!(state.get_default_install_dir().is_none());
+
+        let dest = None::<std::path::PathBuf>;
+        let resolved = match dest {
+            Some(d) => d,
+            None => State::load()
+                .get_default_install_dir()
+                .map(PathBuf::from)
+                .unwrap_or_else(State::default_install_path),
+        };
+        let expected = State::default_install_path();
+        assert_eq!(resolved, expected);
     });
 }
 

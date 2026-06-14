@@ -14,6 +14,9 @@ pub struct CachedRelease {
 pub struct State {
     #[serde(rename = "versions")]
     pub versions: HashMap<String, CachedRelease>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_install_dir: Option<String>,
 }
 
 impl State {
@@ -29,6 +32,16 @@ impl State {
         path.push(".grd");
         path.push("state.toml");
         Ok(path)
+    }
+
+    pub fn default_install_path() -> PathBuf {
+        let home = env::var("HOME")
+            .or_else(|_| env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+        let mut path = PathBuf::from(home);
+        path.push(".grd");
+        path.push("bin");
+        path
     }
 
     #[cfg(test)]
@@ -116,6 +129,14 @@ impl State {
 
     pub fn remove_cached(&mut self, repo: &str) -> Option<CachedRelease> {
         self.versions.remove(repo)
+    }
+
+    pub fn get_default_install_dir(&self) -> Option<&str> {
+        self.default_install_dir.as_deref()
+    }
+
+    pub fn set_default_install_dir(&mut self, path: &str) {
+        self.default_install_dir = Some(path.to_string());
     }
 
     pub fn set_cached(
@@ -313,6 +334,53 @@ asset = "foo.tar.gz"
 "#;
         let parsed: CachedRelease = toml::from_str(without_dest).unwrap();
         assert_eq!(parsed.destination, None);
+    }
+
+    #[test]
+    fn test_default_install_dir_default_is_none() {
+        let state = State::default();
+        assert!(state.default_install_dir.is_none());
+    }
+
+    #[test]
+    fn test_set_default_install_dir() {
+        let mut state = State::default();
+        state.set_default_install_dir("/usr/local/bin");
+        assert_eq!(state.default_install_dir.as_deref(), Some("/usr/local/bin"));
+    }
+
+    #[test]
+    fn test_get_default_install_dir() {
+        let mut state = State::default();
+        assert_eq!(state.get_default_install_dir(), None);
+        state.set_default_install_dir("~/.local/bin");
+        assert_eq!(state.get_default_install_dir(), Some("~/.local/bin"));
+    }
+
+    #[test]
+    fn test_default_install_dir_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_default_install_dir("/opt/bin");
+        state.save();
+
+        let loaded = State::load();
+        assert_eq!(loaded.default_install_dir.as_deref(), Some("/opt/bin"));
+    }
+
+    #[test]
+    fn test_default_install_dir_serialized_only_when_set() {
+        let state = State::default();
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(!content.contains("default_install_dir"));
+
+        let mut state = State::default();
+        state.set_default_install_dir("/tmp");
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(content.contains("default_install_dir"));
     }
 
     #[test]
