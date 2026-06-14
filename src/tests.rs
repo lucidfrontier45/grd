@@ -67,3 +67,33 @@ fn test_integration_download_extract_save() {
     let extracted_path = dest_dir.join(&expected_name);
     assert!(extracted_path.exists());
 }
+
+#[test]
+fn test_confirm_upgrade_accepts_y() {
+    let mut input = std::io::Cursor::new("y\n");
+    assert!(crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}
+
+#[test]
+fn test_confirm_upgrade_accepts_y_uppercase() {
+    let mut input = std::io::Cursor::new("Y\n");
+    assert!(crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}
+
+#[test]
+fn test_confirm_upgrade_rejects_n() {
+    let mut input = std::io::Cursor::new("n\n");
+    assert!(!crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}
+
+#[test]
+fn test_confirm_upgrade_defaults_to_no() {
+    let mut input = std::io::Cursor::new("\n");
+    assert!(!crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}
+
+#[test]
+fn test_confirm_upgrade_rejects_arbitrary() {
+    let mut input = std::io::Cursor::new("maybe\n");
+    assert!(!crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
+}

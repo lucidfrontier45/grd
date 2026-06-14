@@ -2,7 +2,7 @@ use std::env;
 
 use anyhow::Result;
 use clap::Parser;
-use grd::{asset, cli::Args, config, download, extract, github, state};
+use grd::{asset, cli::Args, config, confirm_upgrade, download, extract, github, state};
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -81,11 +81,18 @@ fn main() -> Result<()> {
         };
         if target_path.exists() {
             let cache = state::State::load();
-            let cache_hit = cache
-                .get_cached(&args.repo)
-                .is_some_and(|cached| cached.tag == release.tag_name && cached.asset == asset.name);
+            let cached = cache.get_cached(&args.repo);
+            let cache_hit =
+                cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
             if cache_hit {
                 println!("Already at {} version {}", asset.name, release.tag_name);
+                return Ok(());
+            }
+            if let Some(cached) = cached
+                && !args.yes
+                && !confirm_upgrade(&cached.tag, &release.tag_name)
+            {
+                println!("Upgrade cancelled.");
                 return Ok(());
             }
         }
