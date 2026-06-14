@@ -45,6 +45,9 @@ pub struct Args {
 
     #[arg(long)]
     pub list_platforms: bool,
+
+    #[arg(long)]
+    pub remove: bool,
 }
 
 #[cfg(test)]

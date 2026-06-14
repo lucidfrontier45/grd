@@ -1,4 +1,4 @@
-use std::{env, io::IsTerminal};
+use std::{env, fs, io::IsTerminal, path::PathBuf};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -6,6 +6,36 @@ use grd::{asset, cli::Args, config, confirm_upgrade, download, extract, github, 
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    if args.remove {
+        let mut cache = state::State::load();
+        if let Some(entry) = cache.remove_cached(&args.repo) {
+            let bin_name = args.repo.split('/').next_back().unwrap_or("app");
+            let filename = if cfg!(windows) {
+                format!("{}.exe", bin_name)
+            } else {
+                bin_name.to_string()
+            };
+
+            let dest = entry.destination.as_deref().unwrap_or(".");
+            let target_path = PathBuf::from(dest).join(&filename);
+
+            if target_path.exists() {
+                fs::remove_file(&target_path)?;
+                println!("Removed '{}'", bin_name);
+            } else {
+                eprintln!("Warning: binary not found at {:?}", target_path);
+            }
+
+            cache.save();
+        } else {
+            eprintln!(
+                "Warning: no cached entry found for '{}' — nothing to remove.",
+                args.repo
+            );
+        }
+        return Ok(());
+    }
 
     if args.list_platforms {
         println!("Supported platforms:");
@@ -115,7 +145,12 @@ fn main() -> Result<()> {
     )?;
 
     let mut cache = state::State::load();
-    cache.set_cached(&args.repo, &asset.name, &release.tag_name);
+    cache.set_cached(
+        &args.repo,
+        &asset.name,
+        &release.tag_name,
+        Some(args.destination.display().to_string()),
+    );
     cache.save();
 
     println!(
