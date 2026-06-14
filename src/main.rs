@@ -1,6 +1,6 @@
-use std::env;
+use std::{env, io::IsTerminal};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use grd::{asset, cli::Args, config, confirm_upgrade, download, extract, github, state};
 
@@ -90,10 +90,16 @@ fn main() -> Result<()> {
             }
             if let Some(cached) = cached
                 && !args.yes
-                && !confirm_upgrade(&cached.tag, &release.tag_name)
             {
-                println!("Upgrade cancelled.");
-                return Ok(());
+                if !std::io::stdin().is_terminal() {
+                    bail!(
+                        "refusing to prompt for upgrade in non-interactive mode; pass -y to proceed"
+                    );
+                }
+                if !confirm_upgrade(&cached.tag, &release.tag_name) {
+                    println!("Upgrade cancelled.");
+                    return Ok(());
+                }
             }
         }
     }
