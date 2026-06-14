@@ -5,7 +5,10 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "GitHub Release Downloader")]
 pub struct Args {
-    pub repo: String,
+    pub repo: Option<String>,
+
+    #[arg(long)]
+    pub list_installed: bool,
 
     #[arg(short, long)]
     pub tag: Option<String>,
@@ -82,5 +85,25 @@ mod tests {
     fn test_force_flag_parses_as_true() {
         let args = Args::parse_from(["grd", "owner/repo", "--force"]);
         assert!(args.force);
+    }
+
+    #[test]
+    fn test_list_installed_flag_parses() {
+        let args = Args::parse_from(["grd", "--list-installed"]);
+        assert!(args.list_installed);
+        assert!(args.repo.is_none());
+    }
+
+    #[test]
+    fn test_list_installed_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.list_installed);
+    }
+
+    #[test]
+    fn test_list_installed_with_repo_parses_but_repo_present() {
+        let args = Args::parse_from(["grd", "--list-installed", "owner/repo"]);
+        assert!(args.list_installed);
+        assert_eq!(args.repo.as_deref(), Some("owner/repo"));
     }
 }

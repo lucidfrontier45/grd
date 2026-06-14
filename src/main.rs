@@ -7,10 +7,28 @@ use grd::{asset, cli::Args, config, confirm_upgrade, download, extract, github, 
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    if args.list_installed {
+        if let Some(repo) = &args.repo {
+            bail!("--list-installed does not accept a repo argument: {repo}");
+        }
+        let cache = state::State::load();
+        if cache.versions.is_empty() {
+            println!("No installed packages found.");
+        } else {
+            for (repo, release) in &cache.versions {
+                println!("{} (tag: {}, asset: {})", repo, release.tag, release.asset);
+            }
+        }
+        return Ok(());
+    }
+
     if args.remove {
+        let Some(repo) = &args.repo else {
+            bail!("a repo argument is required for --remove");
+        };
         let mut cache = state::State::load();
-        if let Some(entry) = cache.remove_cached(&args.repo) {
-            let bin_name = args.repo.split('/').next_back().unwrap_or("app");
+        if let Some(entry) = cache.remove_cached(repo) {
+            let bin_name = repo.split('/').next_back().unwrap_or("app");
             let filename = if cfg!(windows) {
                 format!("{}.exe", bin_name)
             } else {
@@ -31,7 +49,7 @@ fn main() -> Result<()> {
         } else {
             eprintln!(
                 "Warning: no cached entry found for '{}' — nothing to remove.",
-                args.repo
+                repo
             );
         }
         return Ok(());
@@ -52,16 +70,20 @@ fn main() -> Result<()> {
     let token = config::get_auth_token();
     let agent = config::configure_agent(&ua, token.as_deref());
 
+    let Some(repo) = &args.repo else {
+        bail!("a repo argument is required");
+    };
+
     if args.list {
-        let releases = github::list_releases(&agent, &args.repo)?;
-        println!("Available releases for {}:", &args.repo);
+        let releases = github::list_releases(&agent, repo)?;
+        println!("Available releases for {}:", repo);
         for rel in releases {
             println!("  - {}", rel.tag_name);
         }
         return Ok(());
     }
 
-    let release = github::fetch_release_info(&agent, &args.repo, args.tag.as_deref())?;
+    let release = github::fetch_release_info(&agent, repo, args.tag.as_deref())?;
     println!("Selected version: {}", release.tag_name);
 
     let os = match &args.os {
@@ -93,13 +115,10 @@ fn main() -> Result<()> {
     })?;
     println!("Selected asset: {}", asset.name);
 
-    let bin_name = args.bin_name.clone().unwrap_or_else(|| {
-        args.repo
-            .split('/')
-            .next_back()
-            .unwrap_or("app")
-            .to_string()
-    });
+    let bin_name = args
+        .bin_name
+        .clone()
+        .unwrap_or_else(|| repo.split('/').next_back().unwrap_or("app").to_string());
 
     if args.tag.is_none() && !args.force {
         let target_path = if args.no_decompress {
@@ -111,7 +130,7 @@ fn main() -> Result<()> {
         };
         if target_path.exists() {
             let cache = state::State::load();
-            let cached = cache.get_cached(&args.repo);
+            let cached = cache.get_cached(repo);
             let cache_hit =
                 cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
             if cache_hit {
@@ -146,7 +165,7 @@ fn main() -> Result<()> {
 
     let mut cache = state::State::load();
     cache.set_cached(
-        &args.repo,
+        repo,
         &asset.name,
         &release.tag_name,
         Some(args.destination.display().to_string()),
