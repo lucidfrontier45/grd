@@ -34,6 +34,9 @@ pub struct Args {
     #[arg(long)]
     pub force: bool,
 
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
     #[arg(long)]
     pub os: Option<String>,
 
@@ -47,6 +50,24 @@ pub struct Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_yes_flag_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.yes);
+    }
+
+    #[test]
+    fn test_yes_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--yes"]);
+        assert!(args.yes);
+    }
+
+    #[test]
+    fn test_yes_flag_short() {
+        let args = Args::parse_from(["grd", "owner/repo", "-y"]);
+        assert!(args.yes);
+    }
 
     #[test]
     fn test_force_flag_defaults_to_false() {
