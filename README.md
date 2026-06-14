@@ -80,6 +80,12 @@ List available versions:
 grd owner/repo --list
 ```
 
+List all previously installed packages (from cache):
+
+```bash
+grd --list-installed
+```
+
 Specify destination directory:
 
 ```bash
@@ -143,6 +149,7 @@ repository in `~/.grd/state.toml`:
 
 - `repo`: GitHub repository (owner/repo)
 - `--tag`: Specific version tag (defaults to latest)
+- `--list-installed`: List all previously downloaded releases from the local cache
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
 - `--bin-name`: Override executable name

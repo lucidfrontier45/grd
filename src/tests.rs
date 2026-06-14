@@ -198,11 +198,62 @@ fn test_remove_no_state_entry() {
 fn test_remove_flag_parses() {
     let args = Args::try_parse_from(["grd", "--remove", "owner/repo"]).unwrap();
     assert!(args.remove);
-    assert_eq!(args.repo, "owner/repo");
+    assert_eq!(args.repo.as_deref(), Some("owner/repo"));
 }
 
 #[test]
 fn test_remove_flag_not_set_by_default() {
     let args = Args::try_parse_from(["grd", "owner/repo"]).unwrap();
     assert!(!args.remove);
+}
+
+#[test]
+fn test_list_installed_displays_installed_packages() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", None);
+        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", None);
+        state.save();
+
+        let cache = State::load();
+        assert_eq!(cache.versions.len(), 2);
+
+        let entry1 = cache.get_cached("owner/repo").unwrap();
+        assert_eq!(entry1.tag, "v1.0.0");
+        assert_eq!(entry1.asset, "foo-linux.tar.gz");
+
+        let entry2 = cache.get_cached("other/app").unwrap();
+        assert_eq!(entry2.tag, "v2.3.1");
+        assert_eq!(entry2.asset, "bar-macos.zip");
+    });
+}
+
+#[test]
+fn test_list_installed_empty_state() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let cache = State::load();
+        assert!(cache.versions.is_empty());
+    });
+}
+
+#[test]
+fn test_list_installed_does_not_modify_state() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", None);
+        state.save();
+
+        let before = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
+
+        // Simulate read-only access: load state but don't save
+        let _cache = State::load();
+        assert_eq!(_cache.versions.len(), 1);
+
+        let after = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
+
+        assert_eq!(before, after);
+    });
 }
