@@ -129,7 +129,7 @@ fn test_remove_deletes_file_and_state_entry() {
             "test/repo",
             "file.tar.gz",
             "v1.0.0",
-            Some(dir.path().display().to_string()),
+            dir.path().display().to_string(),
         );
         state.save();
 
@@ -139,7 +139,7 @@ fn test_remove_deletes_file_and_state_entry() {
 
         let mut cache = State::load();
         let entry = cache.remove_cached("test/repo").unwrap();
-        let dest = entry.destination.unwrap();
+        let dest = entry.destination;
         let target = std::path::PathBuf::from(&dest).join(bin_name);
         std::fs::remove_file(&target).unwrap();
         cache.save();
@@ -159,7 +159,7 @@ fn test_remove_warns_when_binary_missing() {
             "test/repo",
             "file.tar.gz",
             "v1.0.0",
-            Some(dir.path().display().to_string()),
+            dir.path().display().to_string(),
         );
         state.save();
 
@@ -168,7 +168,7 @@ fn test_remove_warns_when_binary_missing() {
 
         let mut cache = State::load();
         let entry = cache.remove_cached("test/repo").unwrap();
-        let dest = entry.destination.unwrap();
+        let dest = entry.destination;
         let target = std::path::PathBuf::from(&dest).join(bin_name);
 
         // Binary doesn't exist — should warn (we can't capture stderr easily, but we check it doesn't panic)
@@ -215,8 +215,8 @@ fn test_list_installed_displays_installed_packages() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", None);
-        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", None);
+        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", String::new());
+        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", String::new());
         state.save();
 
         let cache = State::load();
@@ -301,7 +301,7 @@ fn test_list_installed_does_not_modify_state() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", None);
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
         state.save();
 
         let before = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
@@ -330,7 +330,7 @@ fn test_info_subcommand_displays_cached_entry() {
             "owner/repo",
             "myapp.zip",
             "v1.0.0",
-            Some(dest.to_str().unwrap().to_string()),
+            dest.to_str().unwrap().to_string(),
         );
         state.save();
 
@@ -344,7 +344,7 @@ fn test_info_subcommand_displays_cached_entry() {
         let entry = cache.get_cached(&repo).unwrap();
         assert_eq!(entry.tag, "v1.0.0");
         assert_eq!(entry.asset, "myapp.zip");
-        assert_eq!(entry.destination.as_deref(), Some(dest.to_str().unwrap()));
+        assert_eq!(&entry.destination, dest.to_str().unwrap());
 
         let binary = dest.join("myapp.exe");
         assert!(binary.exists());

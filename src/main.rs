@@ -30,7 +30,7 @@ fn main() -> Result<()> {
                     bin_name.to_string()
                 };
 
-                let dest = entry.destination.as_deref().unwrap_or(".");
+                let dest = &entry.destination;
                 let target_path = PathBuf::from(dest).join(&filename);
 
                 if target_path.exists() {
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
                     } else {
                         bin_name.to_string()
                     };
-                    let dest = entry.destination.as_deref().unwrap_or(".");
+                    let dest = &entry.destination;
                     let binary_path = PathBuf::from(dest).join(&filename);
 
                     println!(
@@ -207,7 +207,7 @@ fn main() -> Result<()> {
         repo,
         &asset.name,
         &release.tag_name,
-        Some(dest.display().to_string()),
+        dest.display().to_string(),
     );
     cache.save();
 

@@ -189,8 +189,10 @@ repository in `~/.grd/state.toml`:
 - **Format**: TOML keyed by `"owner/repo"`:
   ```toml
   [versions]
-  "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz" }
+  "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz", destination = "/usr/local/bin" }
   ```
+  - `destination` is mandatory and records where the binary was installed.
+  - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
 
 ## Options
 
