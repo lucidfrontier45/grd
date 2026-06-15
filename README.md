@@ -70,6 +70,19 @@ Set a default install directory for future downloads (persisted in state cache):
 grd register /usr/local/bin
 ```
 
+### `info`
+
+Show detailed information about an installed package (from cache):
+
+```bash
+grd info owner/repo
+```
+
+Output format is machine-parseable key=value pairs separated by semicolons:
+```
+repo=owner/repo;tag=v1.0.0;asset=app-linux-x86_64.tar.gz;destination=/usr/local/bin;binary=/usr/local/bin/app;binary_exists=true
+```
+
 ### `remove`
 
 Remove an installed package and its state cache entry:

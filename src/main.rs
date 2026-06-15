@@ -49,6 +49,35 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Command::Info { repo }) => {
+            let cache = state::State::load();
+            match cache.get_cached(repo) {
+                Some(entry) => {
+                    let bin_name = repo.split('/').next_back().unwrap_or("app");
+                    let filename = if cfg!(windows) {
+                        format!("{}.exe", bin_name)
+                    } else {
+                        bin_name.to_string()
+                    };
+                    let dest = entry.destination.as_deref().unwrap_or(".");
+                    let binary_path = PathBuf::from(dest).join(&filename);
+
+                    println!(
+                        "repo={};tag={};asset={};destination={};binary={};binary_exists={}",
+                        repo,
+                        entry.tag,
+                        entry.asset,
+                        dest,
+                        binary_path.display(),
+                        binary_path.exists()
+                    );
+                }
+                None => {
+                    eprintln!("No cached entry found for '{}'", repo);
+                }
+            }
+            return Ok(());
+        }
         Some(Command::ListInstalled) => {
             let cache = state::State::load();
             if cache.versions.is_empty() {

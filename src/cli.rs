@@ -59,6 +59,11 @@ pub enum Command {
         /// Repository name (e.g., owner/repo)
         repo: String,
     },
+    /// Show detailed information about an installed package
+    Info {
+        /// Repository name (e.g., owner/repo)
+        repo: String,
+    },
     /// List installed packages
     ListInstalled,
     /// List supported platforms
@@ -97,6 +102,16 @@ mod tests {
     fn test_force_flag_parses_as_true() {
         let args = Args::parse_from(["grd", "owner/repo", "--force"]);
         assert!(args.force);
+    }
+
+    #[test]
+    fn test_info_subcommand_parses() {
+        let args = Args::parse_from(["grd", "info", "owner/repo"]);
+        assert!(args.command.is_some());
+        let Command::Info { repo } = args.command.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(repo, "owner/repo");
     }
 
     #[test]

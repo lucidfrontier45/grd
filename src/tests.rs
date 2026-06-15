@@ -315,3 +315,38 @@ fn test_list_installed_does_not_modify_state() {
         assert_eq!(before, after);
     });
 }
+
+#[test]
+fn test_info_subcommand_displays_cached_entry() {
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path().join("bin");
+    std::fs::create_dir_all(&dest).unwrap();
+    let binary_path = dest.join("myapp.exe");
+    std::fs::write(&binary_path, "fake binary").unwrap();
+
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "owner/repo",
+            "myapp.zip",
+            "v1.0.0",
+            Some(dest.to_str().unwrap().to_string()),
+        );
+        state.save();
+
+        let args = Args::try_parse_from(["grd", "info", "owner/repo"]).unwrap();
+        let Command::Info { repo } = args.command.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(repo, "owner/repo");
+
+        let cache = State::load();
+        let entry = cache.get_cached(&repo).unwrap();
+        assert_eq!(entry.tag, "v1.0.0");
+        assert_eq!(entry.asset, "myapp.zip");
+        assert_eq!(entry.destination.as_deref(), Some(dest.to_str().unwrap()));
+
+        let binary = dest.join("myapp.exe");
+        assert!(binary.exists());
+    });
+}
