@@ -165,7 +165,7 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| repo.split('/').next_back().unwrap_or("app").to_string());
 
-    if args.tag.is_none() && !args.force {
+    if !args.force {
         let target_path = if args.no_decompress {
             dest.join(&asset.name)
         } else if cfg!(windows) {
@@ -176,13 +176,17 @@ fn main() -> Result<()> {
         if target_path.exists() {
             let cache = state::State::load();
             let cached = cache.get_cached(repo);
-            let cache_hit =
+            let is_same_version =
                 cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
-            if cache_hit {
+
+            if is_same_version {
                 println!("Already at {} version {}", asset.name, release.tag_name);
                 return Ok(());
             }
-            if let Some(cached) = cached
+
+            // Prompt for upgrade only when tag is not explicitly pinned
+            if args.tag.is_none()
+                && let Some(cached) = cached
                 && !args.yes
             {
                 if !std::io::stdin().is_terminal() {

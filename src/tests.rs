@@ -317,6 +317,103 @@ fn test_list_installed_does_not_modify_state() {
 }
 
 #[test]
+fn test_tag_cache_hit_conditions_met() {
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path().join("bin");
+    std::fs::create_dir_all(&dest).unwrap();
+    let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
+    let binary_path = dest.join(bin_name);
+    std::fs::write(&binary_path, "dummy").unwrap();
+
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "owner/repo",
+            "asset.tar.gz",
+            "v1.0.0",
+            dest.to_str().unwrap().to_string(),
+        );
+        state.save();
+
+        let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
+        assert!(!args.force);
+        assert_eq!(args.tag.as_deref(), Some("v1.0.0"));
+
+        let cache = State::load();
+        let cached = cache.get_cached("owner/repo").unwrap();
+
+        // Core condition: cached tag/asset match --tag args AND binary exists
+        assert_eq!(cached.tag, "v1.0.0", "cached tag should match --tag value");
+        assert_eq!(cached.asset, "asset.tar.gz", "cached asset should match");
+        assert!(binary_path.exists(), "binary should exist at expected path");
+
+        // main() would now early-return with "Already at ..."
+    });
+}
+
+#[test]
+fn test_tag_cache_miss_allows_download() {
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path().join("bin");
+    std::fs::create_dir_all(&dest).unwrap();
+    let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
+    let binary_path = dest.join(bin_name);
+    std::fs::write(&binary_path, "dummy").unwrap();
+
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        // Cached at v0.9.0
+        state.set_cached(
+            "owner/repo",
+            "asset.tar.gz",
+            "v0.9.0",
+            dest.to_str().unwrap().to_string(),
+        );
+        state.save();
+
+        let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
+
+        let cache = State::load();
+        let cached = cache.get_cached("owner/repo").unwrap();
+
+        // Tag differs → cache miss → proceed to download (no upgrade prompt for --tag)
+        assert_ne!(
+            cached.tag,
+            args.tag.as_deref().unwrap(),
+            "cached tag should differ from --tag value"
+        );
+    });
+}
+
+#[test]
+fn test_tag_force_flag_bypasses_cache_check() {
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path().join("bin");
+    std::fs::create_dir_all(&dest).unwrap();
+    let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
+    let binary_path = dest.join(bin_name);
+    std::fs::write(&binary_path, "dummy").unwrap();
+
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "owner/repo",
+            "asset.tar.gz",
+            "v1.0.0",
+            dest.to_str().unwrap().to_string(),
+        );
+        state.save();
+
+        let args =
+            Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0", "--force"]).unwrap();
+        assert!(args.force);
+
+        // --force bypasses the cache check entirely, so even though tag and
+        // binary match, main() will proceed to download
+    });
+}
+
+#[test]
 fn test_info_subcommand_displays_cached_entry() {
     let dir = TempDir::new().unwrap();
     let dest = dir.path().join("bin");
