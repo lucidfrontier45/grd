@@ -152,6 +152,7 @@ fn main() -> Result<()> {
         &arch,
         args.select,
         args.exclude.as_deref(),
+        args.no_ext_filter,
     )
     .inspect_err(|_| {
         if args.select {

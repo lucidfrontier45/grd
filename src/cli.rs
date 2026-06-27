@@ -31,6 +31,9 @@ pub struct Args {
     #[arg(long = "no-decompress")]
     pub no_decompress: bool,
 
+    #[arg(long = "no-ext-filter")]
+    pub no_ext_filter: bool,
+
     #[arg(short = 'm', long = "memory-limit", default_value = "104857600")]
     pub memory_limit: u64,
 
@@ -155,5 +158,17 @@ mod tests {
     fn test_destination_flag_parses() {
         let args = Args::parse_from(["grd", "owner/repo", "-d", "/tmp"]);
         assert_eq!(args.destination, Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn test_no_ext_filter_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.no_ext_filter);
+    }
+
+    #[test]
+    fn test_no_ext_filter_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--no-ext-filter"]);
+        assert!(args.no_ext_filter);
     }
 }

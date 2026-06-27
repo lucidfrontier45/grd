@@ -23,7 +23,7 @@ fn test_select_asset_from_real_repo() {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    match find_asset(&release.assets, os, arch, None) {
+    match find_asset(&release.assets, os, arch, None, false) {
         Selection::Exact(asset) => println!("Selected asset for {}-{}: {}", os, arch, asset.name),
         Selection::Multiple(matches) => println!("{} matches for {}-{}", matches.len(), os, arch),
         Selection::None => println!("No match for {}-{}", os, arch),
@@ -41,7 +41,7 @@ fn test_integration_download_extract_save() {
     let arch = env::consts::ARCH;
 
     // Skip if multiple or no matches
-    let asset = match find_asset(&release.assets, os, arch, None) {
+    let asset = match find_asset(&release.assets, os, arch, None, false) {
         Selection::Exact(a) => a,
         _ => {
             println!("Skipping test: no unique match for {}-{}", os, arch);

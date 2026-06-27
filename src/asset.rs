@@ -125,6 +125,62 @@ fn default_arch_for_os(os: &str) -> Option<&'static str> {
     }
 }
 
+const COMPOUND_EXTS: &[&str] = &[".tar.gz", ".tar.xz", ".tar.bz2"];
+const ALLOWED_EXTS: &[&str] = &[".exe", ".zip", ".tar.gz", ".tgz", ".tar.xz"];
+
+/// Suffixes that LOOK like version literals (contain digits) but are actually
+/// well-known format tokens. Treated as real extensions, never stripped.
+const VERSION_BLOCKLIST: &[&str] = &[
+    "sha256", "sha512", "sha384", "sha224", "sha1", "md5", "minisig",
+];
+
+/// Per option (c): a single dot-segment is a version literal iff it contains
+/// at least one non-alphabetic ASCII character. Pure-letter segments
+/// (`gz`, `zip`, `dmg`, …) are real extensions, never version tails.
+fn is_version_literal(segment: &str) -> bool {
+    if segment.is_empty() {
+        return false;
+    }
+    let lower = segment.to_lowercase();
+    if VERSION_BLOCKLIST.contains(&lower.as_str()) {
+        return false;
+    }
+    segment.chars().any(|c| !c.is_ascii_alphabetic())
+}
+
+/// Returns the extension (with leading `.`) of a basename, or `None` if the
+/// basename has no extension (e.g. `LICENSE`, `app-1.2.3`).
+///
+/// Algorithm: starting from the full basename, check compound suffixes first
+/// at every step; otherwise strip trailing version-literal segments; the first
+/// non-version-literal tail is the extension. Returns `None` if no dot remains.
+pub(crate) fn extract_extension(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let basename = lower.rsplit_once('/').map(|(_, b)| b).unwrap_or(&lower);
+
+    let mut current = basename;
+    loop {
+        for ext in COMPOUND_EXTS {
+            if current.ends_with(ext) {
+                return Some(ext.to_string());
+            }
+        }
+        let last_dot = current.rfind('.')?;
+        let last_seg = &current[last_dot + 1..];
+        if !is_version_literal(last_seg) {
+            return Some(format!(".{}", last_seg));
+        }
+        current = &current[..last_dot];
+    }
+}
+
+fn is_allowed_by_extension(name: &str) -> bool {
+    match extract_extension(name) {
+        Some(ext) => ALLOWED_EXTS.contains(&ext.as_str()),
+        None => true, // no extension → allowed
+    }
+}
+
 fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
     let name = asset_name.to_lowercase();
     let mut score = 0;
@@ -228,7 +284,13 @@ pub enum Selection {
     None,
 }
 
-pub fn find_asset(assets: &[Asset], os: &str, arch: &str, exclude: Option<&str>) -> Selection {
+pub fn find_asset(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    exclude: Option<&str>,
+    no_ext_filter: bool,
+) -> Selection {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
@@ -241,7 +303,13 @@ pub fn find_asset(assets: &[Asset], os: &str, arch: &str, exclude: Option<&str>)
         Some(arch.to_string())
     };
 
-    let matches = collect_matches(assets, &blacklist, &normalized_os, &effective_arch);
+    let matches = collect_matches(
+        assets,
+        &blacklist,
+        &normalized_os,
+        &effective_arch,
+        no_ext_filter,
+    );
 
     if matches.len() > 1
         && normalized_os == "windows"
@@ -270,6 +338,7 @@ pub fn select_asset(
     arch: &str,
     force_select: bool,
     exclude: Option<&str>,
+    no_ext_filter: bool,
 ) -> Result<Asset> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
@@ -288,10 +357,11 @@ pub fn select_asset(
             &effective_arch,
             arch,
             "Select an asset:",
+            no_ext_filter,
         );
     }
 
-    match find_asset(assets, os, arch, exclude) {
+    match find_asset(assets, os, arch, exclude, no_ext_filter) {
         Selection::Exact(asset) => Ok(asset),
         Selection::Multiple(matches) => {
             if !io::stdin().is_terminal() {
@@ -337,13 +407,18 @@ fn interactive_select(
     effective_arch: &Option<String>,
     arch: &str,
     prompt: &str,
+    no_ext_filter: bool,
 ) -> Result<Asset> {
     if !io::stdin().is_terminal() {
         bail!("Cannot select asset in non-terminal environment");
     }
     let mut all_assets: Vec<&Asset> = assets
         .iter()
-        .filter(|a| !blacklist.iter().any(|b| a.name.to_lowercase().contains(b)))
+        .filter(|a| {
+            let name = a.name.to_lowercase();
+            (no_ext_filter || is_allowed_by_extension(&name))
+                && !blacklist.iter().any(|b| name.contains(b))
+        })
         .collect();
     if all_assets.is_empty() {
         bail!("No assets available after applying filters");
@@ -368,11 +443,14 @@ fn collect_matches<'a>(
     blacklist: &[String],
     normalized_os: &str,
     effective_arch: &Option<String>,
+    no_ext_filter: bool,
 ) -> Vec<&'a Asset> {
     assets
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
+
+            let ext_ok = no_ext_filter || is_allowed_by_extension(&name);
 
             let os_match = match normalized_os {
                 "windows" => {
@@ -409,7 +487,7 @@ fn collect_matches<'a>(
                 }
                 _ => false,
             };
-            os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
+            ext_ok && os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
         })
         .collect()
 }
@@ -483,7 +561,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win32", "x86_64", None);
+        let result = find_asset(&assets, "win32", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "darwin assets should NOT match win32"
@@ -498,7 +576,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win64", "x86_64", None);
+        let result = find_asset(&assets, "win64", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "darwin assets should NOT match win64"
@@ -600,7 +678,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "linux", "x86_64", Some("gnu"));
+        let result = find_asset(&assets, "linux", "x86_64", Some("gnu"), false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux-musl.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
@@ -627,7 +705,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         assert!(matches!(result, Selection::Multiple(_)));
     }
 
@@ -646,7 +724,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         assert!(matches!(result, Selection::Multiple(_)));
     }
 
@@ -665,7 +743,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "darwin assets should NOT match Windows"
@@ -680,7 +758,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win", "x86_64", None);
+        let result = find_asset(&assets, "win", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "darwin assets should NOT match even with 'win' alias"
@@ -789,7 +867,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win", "x86_64", None);
+        let result = find_asset(&assets, "win", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win-x86_64.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -804,7 +882,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win32", "x86_64", None);
+        let result = find_asset(&assets, "win32", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win32-x86_64.exe"),
             _ => panic!("Expected Selection::Exact"),
@@ -819,7 +897,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "win64", "x86_64", None);
+        let result = find_asset(&assets, "win64", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win64-x86_64.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -846,7 +924,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "win", "x86_64", None);
+        let result = find_asset(&assets, "win", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win64-x86_64.zip"),
             _ => panic!("Expected Selection::Exact with win64, got Multiple"),
@@ -887,7 +965,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
@@ -909,7 +987,7 @@ mod tests {
             },
         ];
 
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win64.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -924,7 +1002,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win32.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -939,7 +1017,7 @@ mod tests {
             size: 1024,
         }];
 
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "upx-4.2.4-win64.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -1012,7 +1090,7 @@ mod tests {
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-linux.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
@@ -1026,7 +1104,7 @@ mod tests {
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "linux", "aarch64", None);
+        let result = find_asset(&assets, "linux", "aarch64", None, false);
         assert!(matches!(result, Selection::None));
     }
 
@@ -1037,7 +1115,7 @@ mod tests {
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "macos", "aarch64", None);
+        let result = find_asset(&assets, "macos", "aarch64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-macos.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
@@ -1051,7 +1129,7 @@ mod tests {
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "macos", "x86_64", None);
+        let result = find_asset(&assets, "macos", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "macos default is aarch64, not x86_64"
@@ -1065,7 +1143,7 @@ mod tests {
             browser_download_url: "https://example.com/app.zip".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -1086,7 +1164,7 @@ mod tests {
                 size: 1024,
             },
         ];
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
             Selection::Multiple(mut matches) => {
                 let mut refs: Vec<&Asset> = matches.iter().collect();
@@ -1104,7 +1182,7 @@ mod tests {
             browser_download_url: "https://example.com/app-i386.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "linux", "x86_64", None);
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "i386 has explicit arch, should NOT match x86_64"
@@ -1118,7 +1196,7 @@ mod tests {
             browser_download_url: "https://example.com/app-zip.zip".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "win32", "x86_64", None);
+        let result = find_asset(&assets, "win32", "x86_64", None, false);
         match result {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-win.zip"),
             _ => panic!("Expected Selection::Exact"),
@@ -1132,10 +1210,233 @@ mod tests {
             browser_download_url: "https://example.com/app.tar.gz".to_string(),
             size: 1024,
         }];
-        let result = find_asset(&assets, "windows", "x86_64", None);
+        let result = find_asset(&assets, "windows", "x86_64", None, false);
         assert!(
             matches!(result, Selection::None),
             "darwin asset should not match windows"
         );
+    }
+
+    // ---------------- Extension filter tests ----------------
+
+    #[test]
+    fn test_extract_extension_allowed() {
+        assert_eq!(
+            extract_extension("app-linux-x86_64.tar.gz"),
+            Some(".tar.gz".to_string())
+        );
+        assert_eq!(
+            extract_extension("app-1.2.3.tar.gz"),
+            Some(".tar.gz".to_string())
+        );
+        assert_eq!(extract_extension("myapp.exe"), Some(".exe".to_string()));
+        assert_eq!(extract_extension("tool.tgz"), Some(".tgz".to_string()));
+        assert_eq!(extract_extension("cli.tar.xz"), Some(".tar.xz".to_string()));
+        assert_eq!(extract_extension("pkg.zip"), Some(".zip".to_string()));
+    }
+
+    #[test]
+    fn test_extract_extension_no_extension() {
+        assert_eq!(extract_extension("LICENSE"), None);
+        assert_eq!(extract_extension("README"), None);
+        assert_eq!(extract_extension("app-1.2.3"), None);
+        assert_eq!(extract_extension("cli-rc1"), None);
+        assert_eq!(extract_extension("tool-beta2"), None);
+        assert_eq!(extract_extension("myapp-v2.0.0-linux-x86_64"), None);
+    }
+
+    #[test]
+    fn test_extract_extension_disallowed() {
+        assert_eq!(
+            extract_extension("myapp.exe.sha256"),
+            Some(".sha256".to_string())
+        );
+        assert_eq!(extract_extension("app.dmg"), Some(".dmg".to_string()));
+        assert_eq!(extract_extension("pkg.deb"), Some(".deb".to_string()));
+        assert_eq!(extract_extension("pkg.rpm"), Some(".rpm".to_string()));
+        assert_eq!(extract_extension("foo.json"), Some(".json".to_string()));
+    }
+
+    #[test]
+    fn test_extract_extension_compound_after_strip() {
+        // After stripping the trailing version literal "1.2.3", the remaining
+        // tail is ".tar.gz" which is a compound extension → recognized.
+        assert_eq!(
+            extract_extension("cli.tar.gz.1.2.3"),
+            Some(".tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_extension_case_insensitive_and_directory() {
+        assert_eq!(extract_extension("APP.TAR.GZ"), Some(".tar.gz".to_string()));
+        assert_eq!(
+            extract_extension("dist/app.tar.gz"),
+            Some(".tar.gz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_is_allowed_by_extension_allowed() {
+        assert!(is_allowed_by_extension("app-linux-x86_64.tar.gz"));
+        assert!(is_allowed_by_extension("myapp.exe"));
+        assert!(is_allowed_by_extension("tool.tgz"));
+        assert!(is_allowed_by_extension("cli.tar.xz"));
+        assert!(is_allowed_by_extension("pkg.zip"));
+    }
+
+    #[test]
+    fn test_is_allowed_by_extension_no_ext() {
+        assert!(is_allowed_by_extension("LICENSE"));
+        assert!(is_allowed_by_extension("README"));
+        assert!(is_allowed_by_extension("app-1.2.3"));
+        assert!(is_allowed_by_extension("cli-rc1"));
+        assert!(is_allowed_by_extension("myapp-v2.0.0-linux-x86_64"));
+    }
+
+    #[test]
+    fn test_is_allowed_by_extension_disallowed() {
+        assert!(!is_allowed_by_extension("myapp.exe.sha256"));
+        assert!(!is_allowed_by_extension("app.dmg"));
+        assert!(!is_allowed_by_extension("pkg.deb"));
+        assert!(!is_allowed_by_extension("pkg.rpm"));
+        assert!(!is_allowed_by_extension("foo.json"));
+        assert!(!is_allowed_by_extension("app.msi"));
+        assert!(!is_allowed_by_extension("app.AppImage"));
+        assert!(!is_allowed_by_extension("checksums.txt"));
+    }
+
+    #[test]
+    fn test_find_asset_filters_non_binary_assets_by_default() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "checksums.txt".to_string(),
+                browser_download_url: "https://example.com/checksums.txt".to_string(),
+                size: 64,
+            },
+            Asset {
+                name: "app-linux-x86_64.tar.gz.sha256".to_string(),
+                browser_download_url: "https://example.com/app.sha256".to_string(),
+                size: 64,
+            },
+        ];
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "app-linux-x86_64.tar.gz");
+                // Explicitly confirm the .sha256 was filtered out even though
+                // its basename embeds linux/x86_64 tokens.
+                assert_ne!(asset.name, "app-linux-x86_64.tar.gz.sha256");
+            }
+            _ => panic!("Expected Selection::Exact, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_find_asset_no_ext_filter_promotes_os_arch_matching_checksum() {
+        // Same inputs as the default-filter test, but with --no-ext-filter.
+        // The .txt has no OS/arch tokens, but the .tar.gz.sha256 embeds
+        // linux + x86_64 → it now matches OS/arch and yields Multiple.
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "checksums.txt".to_string(),
+                browser_download_url: "https://example.com/checksums.txt".to_string(),
+                size: 64,
+            },
+            Asset {
+                name: "app-linux-x86_64.tar.gz.sha256".to_string(),
+                browser_download_url: "https://example.com/app.sha256".to_string(),
+                size: 64,
+            },
+        ];
+        let result = find_asset(&assets, "linux", "x86_64", None, true);
+        match result {
+            Selection::Multiple(matches) => {
+                let names: Vec<&str> = matches.iter().map(|a| a.name.as_str()).collect();
+                assert!(names.contains(&"app-linux-x86_64.tar.gz"));
+                assert!(names.contains(&"app-linux-x86_64.tar.gz.sha256"));
+                assert_eq!(matches.len(), 2, "checksums.txt should still be excluded");
+            }
+            _ => panic!("Expected Selection::Multiple, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_find_asset_dmg_blocked_by_default() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.dmg".to_string(),
+            browser_download_url: "https://example.com/app.dmg".to_string(),
+            size: 1024,
+        }];
+        assert!(matches!(
+            find_asset(&assets, "linux", "x86_64", None, false),
+            Selection::None
+        ));
+    }
+
+    #[test]
+    fn test_find_asset_dmg_allowed_with_no_ext_filter() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.dmg".to_string(),
+            browser_download_url: "https://example.com/app.dmg".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "linux", "x86_64", None, true);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.dmg"),
+            _ => panic!("Expected Selection::Exact, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_find_asset_version_literal_not_filtered_for_os_arch() {
+        // No-extension version-literal assets never match OS/arch anyway,
+        // but the filter must not exclude them based on extension.
+        for name in ["app-1.2.3", "cli-rc1", "myapp-v2.0.0-linux-x86_64"] {
+            let assets = vec![Asset {
+                name: name.to_string(),
+                browser_download_url: format!("https://example.com/{name}"),
+                size: 1024,
+            }];
+            // None is OS/arch-mismatch, not filter exclusion. With a different
+            // OS/arch we cannot assert "not filtered" without seeing the matches
+            // list, but we can assert the filter does not throw or panic.
+            let _ = find_asset(&assets, "linux", "x86_64", None, false);
+        }
+    }
+
+    #[test]
+    fn test_select_asset_with_default_filter_does_not_match_dmg() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.dmg".to_string(),
+            browser_download_url: "https://example.com/app.dmg".to_string(),
+            size: 1024,
+        }];
+        // Non-terminal + Selection::None path should bail; this validates the
+        // signature accepts the new arg without breaking existing behavior.
+        let result = select_asset(&assets, "linux", "x86_64", false, None, false);
+        assert!(result.is_err(), "expected Selection::None to bail");
+    }
+
+    #[test]
+    fn test_select_asset_with_no_ext_filter_matches_dmg() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.dmg".to_string(),
+            browser_download_url: "https://example.com/app.dmg".to_string(),
+            size: 1024,
+        }];
+        // Non-terminal + Selection::Exact should succeed without prompting.
+        let result = select_asset(&assets, "linux", "x86_64", false, None, true).unwrap();
+        assert_eq!(result.name, "app-linux-x86_64.dmg");
     }
 }

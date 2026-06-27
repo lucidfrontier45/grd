@@ -165,6 +165,12 @@ Download without decompressing/extracting:
 grd owner/repo --no-decompress
 ```
 
+Disable the default extension allowlist (see [Extension Filter](#extension-filter) below):
+
+```bash
+grd owner/repo --no-ext-filter
+```
+
 
 
 ## Memory Usage
@@ -172,6 +178,47 @@ grd owner/repo --no-decompress
 - Downloads smaller than the memory limit are loaded entirely into RAM for processing.
 - Larger downloads use temporary files to avoid excessive memory consumption.
 - The default limit is 100MB, but can be adjusted with `--memory-limit`.
+
+## Extension Filter
+
+To avoid matching non-binary artifacts (checksums, signatures, license files,
+manifests, package formats like `.dmg`/`.deb`/`.rpm`), `grd` applies a default
+allowlist to asset names before OS/arch scoring.
+
+**Default allowlist** (case-insensitive):
+
+- `.exe`
+- `.zip`
+- `.tar.gz`
+- `.tgz`
+- `.tar.xz`
+
+**Always allowed**, regardless of allowlist:
+
+- Assets with **no extension** (e.g. `LICENSE`, `README`, `app`).
+- Assets whose trailing dot-segments are **version literals** (e.g. `app-1.2.3`,
+  `cli-rc1`, `myapp-v2.0.0-linux-x86_64`). A trailing segment counts as a
+  version literal iff it contains at least one non-letter character; pure-letter
+  segments (`gz`, `zip`, `dmg`, …) are always treated as extensions.
+
+**Behavior change**: assets with `.dmg`, `.deb`, `.rpm`, `.pkg`, `.msi`,
+`.AppImage`, `.sha256`, `.sig`, `.asc`, `.txt`, `.json`, `.yaml`, `.blockmap`,
+`.pdb`, `.map`, `.wasm`, etc. no longer match by default — even when their
+filename embeds OS/arch tokens. For example, `app-linux-x86_64.tar.gz.sha256`
+is **filtered out** under the default behavior.
+
+**Opt-out with `--no-ext-filter`**: a full opt-out (not a partial filter). All
+extensions pass through to OS/arch scoring. With `--no-ext-filter`, the same
+`app-linux-x86_64.tar.gz.sha256` asset would be kept as a candidate because it
+contains `linux` + `x86_64`, yielding `Selection::Multiple` rather than `Exact`.
+
+```bash
+grd owner/repo --no-ext-filter
+```
+
+Note: `--no-ext-filter` only affects asset selection. The download/extraction
+pipeline still only knows the 5 allowlisted formats above; selecting an
+unrecognized format is the user's explicit opt-in.
 
 ## Version Cache
 
@@ -206,6 +253,7 @@ repository in `~/.grd/state.toml`:
 - `--select`: Force manual selection from all available assets
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
+- `--no-ext-filter`: Disable the default extension allowlist (see Extension Filter below)
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
 - `--force`: Skip the version cache check and force a fresh download.
 - `-y / --yes`: Skip the upgrade confirmation prompt.

@@ -63,3 +63,14 @@ The result of matching assets against a target OS + arch:
 
 ## Version Cache
 Persistent state at `~/.grd/state.toml` keyed by `"owner/repo"`, recording the last-downloaded version to skip re-downloads.
+
+## Extension Filter
+A default allowlist applied to asset names **before** OS/arch scoring, so non-binary artifacts (checksums, signatures, license files, manifests, package formats like `.dmg`/`.deb`/`.rpm`) never reach selection.
+
+| Aspect | Behavior |
+|--------|----------|
+| Allowlist | `.exe`, `.zip`, `.tar.gz`, `.tgz`, `.tar.xz` (case-insensitive) |
+| Always allowed | Files with no extension, and version-literal tails (e.g. `app-1.2.3`, `cli-rc1`) |
+| Filter scope | Selection only — extraction pipeline still only knows the 5 allowlisted formats |
+| Opt-out | `--no-ext-filter` (disables the filter; previous behavior restored) |
+
