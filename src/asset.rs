@@ -93,6 +93,38 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+fn has_explicit_arch_pattern(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.contains("x86_64")
+        || name.contains("amd64")
+        || name.contains("x64")
+        || name.contains("aarch64")
+        || name.contains("arm64")
+        || name.contains("i686")
+        || name.contains("i386")
+        || name.contains("armhf")
+        || name.contains("armv7")
+        || name.contains("riscv64")
+        || name.contains("riscv32")
+        || name.contains("ppc64le")
+        || name.contains("ppc64")
+        || name.contains("powerpc")
+        || name.contains("s390x")
+        || name.contains("mips")
+        || name.contains("win64")
+        || name.contains("win32")
+        || name.contains("x86")
+}
+
+fn default_arch_for_os(os: &str) -> Option<&'static str> {
+    match os {
+        "linux" => Some("x86_64"),
+        "macos" => Some("aarch64"),
+        "windows" => Some("x86_64"),
+        _ => None,
+    }
+}
+
 fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
     let name = asset_name.to_lowercase();
     let mut score = 0;
@@ -366,8 +398,15 @@ fn collect_matches<'a>(
                         || name.contains("x64")
                         || (normalized_os == "windows" && name.contains("win64"))
                         || (normalized_os == "windows" && name.contains("win32"))
+                        || (!has_explicit_arch_pattern(&name)
+                            && default_arch_for_os(normalized_os) == Some("x86_64"))
                 }
-                Some("aarch64") => name.contains("aarch64") || name.contains("arm64"),
+                Some("aarch64") => {
+                    name.contains("aarch64")
+                        || name.contains("arm64")
+                        || (!has_explicit_arch_pattern(&name)
+                            && default_arch_for_os(normalized_os) == Some("aarch64"))
+                }
                 _ => false,
             };
             os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
@@ -917,5 +956,186 @@ mod tests {
     fn test_normalize_os_win64() {
         let result = normalize_os("win64").unwrap();
         assert_eq!(result, "windows");
+    }
+    #[test]
+    fn test_default_arch_for_os_values() {
+        assert_eq!(default_arch_for_os("linux"), Some("x86_64"));
+        assert_eq!(default_arch_for_os("macos"), Some("aarch64"));
+        assert_eq!(default_arch_for_os("windows"), Some("x86_64"));
+        assert_eq!(default_arch_for_os("freebsd"), None);
+        assert_eq!(default_arch_for_os(""), None);
+    }
+
+    #[test]
+    fn test_has_explicit_arch_pattern_supported() {
+        assert!(has_explicit_arch_pattern("app-linux-x86_64.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-amd64.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-aarch64.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-arm64.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-win64.zip"));
+        assert!(has_explicit_arch_pattern("app-win32.zip"));
+        assert!(has_explicit_arch_pattern("app.linux.x64.tar.gz"));
+    }
+
+    #[test]
+    fn test_has_explicit_arch_pattern_unsupported() {
+        assert!(has_explicit_arch_pattern("app-linux-i386.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-i686.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-armhf.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-armv7.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-riscv64.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-ppc64le.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-s390x.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-mips.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux-powerpc.tar.gz"));
+    }
+
+    #[test]
+    fn test_has_explicit_arch_pattern_x86_32() {
+        assert!(has_explicit_arch_pattern("app-linux-x86.tar.gz"));
+        assert!(has_explicit_arch_pattern("app-linux.i386.rpm"));
+    }
+
+    #[test]
+    fn test_has_explicit_arch_pattern_no_arch() {
+        assert!(!has_explicit_arch_pattern("app-linux.tar.gz"));
+        assert!(!has_explicit_arch_pattern("app-macos.zip"));
+        assert!(!has_explicit_arch_pattern("app-win.zip"));
+        assert!(!has_explicit_arch_pattern("app.zip"));
+        assert!(!has_explicit_arch_pattern("app-linux-musl.tar.gz"));
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_assumes_x86_64_linux() {
+        let assets = vec![Asset {
+            name: "app-linux.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-linux.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_does_not_match_aarch64_linux() {
+        let assets = vec![Asset {
+            name: "app-linux.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "linux", "aarch64", None);
+        assert!(matches!(result, Selection::None));
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_assumes_aarch64_macos() {
+        let assets = vec![Asset {
+            name: "app-macos.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "macos", "aarch64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-macos.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_does_not_match_x86_64_macos() {
+        let assets = vec![Asset {
+            name: "app-macos.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "macos", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "macos default is aarch64, not x86_64"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_assumes_x86_64_windows() {
+        let assets = vec![Asset {
+            name: "app-win.zip".to_string(),
+            browser_download_url: "https://example.com/app.zip".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_explicit_arch_preferred_over_implicit() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-x86_64.tar.gz".to_string(),
+                size: 2048,
+            },
+            Asset {
+                name: "app-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-noarch.tar.gz".to_string(),
+                size: 1024,
+            },
+        ];
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        match result {
+            Selection::Multiple(mut matches) => {
+                let mut refs: Vec<&Asset> = matches.iter().collect();
+                sort_by_score(&mut refs, "linux", "x86_64");
+                assert_eq!(refs[0].name, "app-linux-x86_64.tar.gz");
+            }
+            _ => panic!("Expected Selection::Multiple"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_i386_not_matched_as_x86_64() {
+        let assets = vec![Asset {
+            name: "app-linux-i386.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app-i386.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "linux", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "i386 has explicit arch, should NOT match x86_64"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_win32_alias_matches() {
+        let assets = vec![Asset {
+            name: "app-win.zip".to_string(),
+            browser_download_url: "https://example.com/app-zip.zip".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "win32", "x86_64", None);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-win.zip"),
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_no_arch_darwin_exclusion_still_applies() {
+        let assets = vec![Asset {
+            name: "app-darwin.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+        let result = find_asset(&assets, "windows", "x86_64", None);
+        assert!(
+            matches!(result, Selection::None),
+            "darwin asset should not match windows"
+        );
     }
 }
