@@ -411,7 +411,12 @@ pub fn select_asset(
     let effective_arch = inferred_arch.or(Some(normalized_arch));
     let arch_ref = effective_arch.as_deref().unwrap_or(arch);
 
-    if matches!(mode, SelectMode::Filtered | SelectMode::All) && !io::stdin().is_terminal() {
+    let stdin_is_terminal = if cfg!(test) {
+        false
+    } else {
+        io::stdin().is_terminal()
+    };
+    if matches!(mode, SelectMode::Filtered | SelectMode::All) && !stdin_is_terminal {
         bail!("Cannot select asset in non-terminal environment");
     }
 
