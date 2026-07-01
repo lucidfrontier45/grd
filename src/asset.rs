@@ -338,13 +338,18 @@ pub enum AssetSelection {
     Multiple(Vec<Asset>),
 }
 
-pub fn find_asset(
-    assets: &[Asset],
+/// Filter `assets` by platform, then try to pick a single best match.
+///
+/// Returns the full candidate list and, when one asset clearly wins the
+/// scoring, a clone of that winner. Callers that want a prompt-on-tie UX
+/// use the candidate list; auto-pick callers use the winner.
+fn resolve_candidates<'a>(
+    assets: &'a [Asset],
     os: &str,
     arch: &str,
     exclude: Option<&str>,
     no_ext_filter: bool,
-) -> Selection {
+) -> (Vec<&'a Asset>, Option<Asset>) {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
@@ -371,7 +376,7 @@ pub fn find_asset(
         &normalized_os,
         effective_arch.as_deref().unwrap_or(arch),
     ) {
-        return Selection::Exact(asset.clone());
+        return (matches, Some(asset.clone()));
     }
 
     if matches.len() > 1
@@ -384,8 +389,24 @@ pub fn find_asset(
             .cloned()
             .collect();
         if win64.len() == 1 {
-            return Selection::Exact(win64[0].clone());
+            return (matches, Some(win64[0].clone()));
         }
+    }
+
+    (matches, None)
+}
+
+pub fn find_asset(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    exclude: Option<&str>,
+    no_ext_filter: bool,
+) -> Selection {
+    let (matches, winner) = resolve_candidates(assets, os, arch, exclude, no_ext_filter);
+
+    if let Some(asset) = winner {
+        return Selection::Exact(asset);
     }
 
     match matches.len() {
@@ -403,14 +424,6 @@ pub fn select_asset(
     exclude: Option<&str>,
     no_ext_filter: bool,
 ) -> Result<AssetSelection> {
-    let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
-        s.split(',').map(|w| w.trim().to_lowercase()).collect()
-    });
-    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
-    let normalized_arch = canonical_arch_for_matching(arch);
-    let effective_arch = inferred_arch.or(Some(normalized_arch));
-    let arch_ref = effective_arch.as_deref().unwrap_or(arch);
-
     let stdin_is_terminal = if cfg!(test) {
         false
     } else {
@@ -420,8 +433,16 @@ pub fn select_asset(
         bail!("Cannot select asset in non-terminal environment");
     }
 
+    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let normalized_arch = canonical_arch_for_matching(arch);
+    let effective_arch = inferred_arch.or(Some(normalized_arch));
+    let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+
     match mode {
         SelectMode::All => {
+            let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
+                s.split(',').map(|w| w.trim().to_lowercase()).collect()
+            });
             let selected = interactive_select(
                 assets,
                 &blacklist,
@@ -434,13 +455,7 @@ pub fn select_asset(
             Ok(AssetSelection::Single(selected))
         }
         SelectMode::Filtered => {
-            let mut matches = collect_matches(
-                assets,
-                &blacklist,
-                &normalized_os,
-                &effective_arch,
-                no_ext_filter,
-            );
+            let mut matches = resolve_candidates(assets, os, arch, exclude, no_ext_filter).0;
             if matches.is_empty() {
                 bail!("No matching asset found for {normalized_os}-{arch_ref}");
             }
