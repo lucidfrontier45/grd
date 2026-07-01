@@ -76,8 +76,9 @@ pub fn normalize_arch(input: &str) -> Result<String> {
     match normalized.as_str() {
         "x86_64" | "amd64" | "x64" => Ok("x86_64".to_string()),
         "aarch64" | "arm64" => Ok("aarch64".to_string()),
+        "loong64" | "loongarch64" => Ok("loong64".to_string()),
         _ => bail!(
-            "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64)",
+            "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64), loong64 (alias: loongarch64)",
             input
         ),
     }
@@ -100,6 +101,8 @@ fn has_explicit_arch_pattern(name: &str) -> bool {
         || name.contains("x64")
         || name.contains("aarch64")
         || name.contains("arm64")
+        || name.contains("loong64")
+        || name.contains("loongarch64")
         || name.contains("i686")
         || name.contains("i386")
         || name.contains("armhf")
@@ -195,6 +198,7 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
     let arch_patterns = match target_arch {
         "x86_64" => vec!["x86_64", "amd64", "x64", "win64"],
         "aarch64" => vec!["aarch64", "arm64"],
+        "loong64" => vec!["loong64", "loongarch64"],
         _ => vec![],
     };
 
@@ -244,6 +248,43 @@ fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
         let score_b = calculate_match_score(&b.name, target_os, target_arch);
         score_b.cmp(&score_a)
     });
+}
+
+fn best_unique_match<'a>(
+    assets: &[&'a Asset],
+    target_os: &str,
+    target_arch: &str,
+) -> Option<&'a Asset> {
+    let mut best: Option<(&'a Asset, i32)> = None;
+    let mut best_count = 0;
+
+    for asset in assets {
+        let score = calculate_match_score(&asset.name, target_os, target_arch);
+        match best {
+            None => {
+                best = Some((asset, score));
+                best_count = 1;
+            }
+            Some((_, best_score)) if score > best_score => {
+                best = Some((asset, score));
+                best_count = 1;
+            }
+            Some((_, best_score)) if score == best_score => {
+                best_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if best_count == 1 {
+        best.map(|(asset, _)| asset)
+    } else {
+        None
+    }
+}
+
+fn canonical_arch_for_matching(arch: &str) -> String {
+    normalize_arch(arch).unwrap_or_else(|_| arch.to_lowercase())
 }
 
 fn show_all_assets(assets: &[&Asset], target_os: &str, target_arch: &str) {
@@ -296,11 +337,12 @@ pub fn find_asset(
     });
 
     let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let normalized_arch = canonical_arch_for_matching(arch);
 
     let effective_arch = if inferred_arch.is_some() {
         inferred_arch
     } else {
-        Some(arch.to_string())
+        Some(normalized_arch)
     };
 
     let matches = collect_matches(
@@ -310,6 +352,14 @@ pub fn find_asset(
         &effective_arch,
         no_ext_filter,
     );
+
+    if let Some(asset) = best_unique_match(
+        &matches,
+        &normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    ) {
+        return Selection::Exact(asset.clone());
+    }
 
     if matches.len() > 1
         && normalized_os == "windows"
@@ -344,7 +394,8 @@ pub fn select_asset(
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
     let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
-    let effective_arch = inferred_arch.or(Some(arch.to_string()));
+    let normalized_arch = canonical_arch_for_matching(arch);
+    let effective_arch = inferred_arch.or(Some(normalized_arch));
 
     if force_select {
         if !io::stdin().is_terminal() {
@@ -485,6 +536,12 @@ fn collect_matches<'a>(
                         || (!has_explicit_arch_pattern(&name)
                             && default_arch_for_os(normalized_os) == Some("aarch64"))
                 }
+                Some("loong64") => {
+                    name.contains("loong64")
+                        || name.contains("loongarch64")
+                        || (!has_explicit_arch_pattern(&name)
+                            && default_arch_for_os(normalized_os) == Some("loong64"))
+                }
                 _ => false,
             };
             ext_ok && os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
@@ -523,6 +580,8 @@ mod tests {
         assert_eq!(normalize_arch("aarch64").unwrap(), "aarch64");
         assert_eq!(normalize_arch("arm64").unwrap(), "aarch64");
         assert_eq!(normalize_arch("ARM64").unwrap(), "aarch64");
+        assert_eq!(normalize_arch("loong64").unwrap(), "loong64");
+        assert_eq!(normalize_arch("loongarch64").unwrap(), "loong64");
     }
 
     #[test]
@@ -581,6 +640,33 @@ mod tests {
             matches!(result, Selection::None),
             "darwin assets should NOT match win64"
         );
+    }
+
+    #[test]
+    fn test_select_asset_loong64_not_matched_to_x86_64() {
+        let assets = vec![Asset {
+            name: "app-linux-loong64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
+        assert!(
+            matches!(result, Selection::None),
+            "loong64 assets should NOT match x86_64"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_loong64_matches_loong64() {
+        let assets = vec![Asset {
+            name: "app-linux-loong64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "linux", "loong64", None, false);
+        assert!(matches!(result, Selection::Exact(_)));
     }
 
     #[test]
@@ -726,6 +812,78 @@ mod tests {
 
         let result = find_asset(&assets, "linux", "x86_64", None, false);
         assert!(matches!(result, Selection::Multiple(_)));
+    }
+
+    #[test]
+    fn test_select_asset_prefers_linux_amd64_over_linux() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/linux.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-linux-amd64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/linux-amd64.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "linux", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-linux-amd64.tar.gz")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_prefers_windows_amd64_over_windows() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-windows.zip".to_string(),
+                browser_download_url: "https://example.com/windows.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-windows-amd64.zip".to_string(),
+                browser_download_url: "https://example.com/windows-amd64.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "windows", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-windows-amd64.zip")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_prefers_win64_over_windows() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-windows.zip".to_string(),
+                browser_download_url: "https://example.com/windows.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-win64.zip".to_string(),
+                browser_download_url: "https://example.com/win64.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "win64", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-win64.zip")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -1166,12 +1324,8 @@ mod tests {
         ];
         let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
-            Selection::Multiple(mut matches) => {
-                let mut refs: Vec<&Asset> = matches.iter().collect();
-                sort_by_score(&mut refs, "linux", "x86_64");
-                assert_eq!(refs[0].name, "app-linux-x86_64.tar.gz");
-            }
-            _ => panic!("Expected Selection::Multiple"),
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
         }
     }
 
