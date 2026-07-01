@@ -320,8 +320,33 @@ fn collect_selection<'a>(assets: &'a [&'a Asset]) -> Result<&'a Asset> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMode {
+    /// Auto-pick the best-matching asset using score-based resolution.
+    ///
+    /// Calls `find_asset` internally:
+    /// - **Exact** — one asset clearly beats all others → returned as `AssetSelection::Single`.
+    /// - **Multiple** — tie among top scorers → all returned as `AssetSelection::Multiple`.
+    /// - **None** — no platform match → bails with error.
+    ///
+    /// No interactivity. Works in non-TTY (CI, pipes). Default behavior when no
+    /// `--select` / `--select-all` flag is passed.
     Default,
+
+    /// Present a filtered, sorted list of candidates and let the user pick one interactively.
+    ///
+    /// Calls `resolve_candidates` to filter assets by OS/arch, then scores and sorts
+    /// them for display. The user selects a single entry via stdin.
+    ///
+    /// Requires a TTY — bails with error if stdin is not a terminal.
+    /// Activated by `--select` on the CLI.
     Filtered,
+
+    /// Full interactive browser showing every asset in the release.
+    ///
+    /// No platform pre-filtering. Passes the entire asset list to `interactive_select`
+    /// for TUI-style picking (e.g., skim / fzf).
+    ///
+    /// Requires a TTY — bails with error if stdin is not a terminal.
+    /// Activated by `--select-all` on the CLI.
     All,
 }
 
