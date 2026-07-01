@@ -22,8 +22,11 @@ pub struct Args {
     #[arg(short, long)]
     pub bin_name: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "select_all")]
     pub select: bool,
+
+    #[arg(long, conflicts_with = "select")]
+    pub select_all: bool,
 
     #[arg(long)]
     pub exclude: Option<String>,
@@ -170,5 +173,18 @@ mod tests {
     fn test_no_ext_filter_parses_as_true() {
         let args = Args::parse_from(["grd", "owner/repo", "--no-ext-filter"]);
         assert!(args.no_ext_filter);
+    }
+
+    #[test]
+    fn test_select_all_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--select-all"]);
+        assert!(args.select_all);
+    }
+
+    #[test]
+    fn test_select_conflicts_with_select_all() {
+        let err = Args::try_parse_from(["grd", "owner/repo", "--select", "--select-all"])
+            .expect_err("--select and --select-all must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

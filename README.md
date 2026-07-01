@@ -250,7 +250,8 @@ repository in `~/.grd/state.toml`:
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
 - `--bin-name`: Override executable name
-- `--select`: Force manual selection from all available assets
+- `--select`: Force manual selection from filtered (OS/arch-matched) candidates
+- `--select-all`: Force manual selection from all available assets (ignores OS/arch filter)
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
 - `--no-ext-filter`: Disable the default extension allowlist (see Extension Filter below)
@@ -259,6 +260,8 @@ repository in `~/.grd/state.toml`:
 - `-y / --yes`: Skip the upgrade confirmation prompt.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
 - `--arch`: Target architecture (x86_64, aarch64, loong64, amd64, x64, arm64, loongarch64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64; loongarch64 → loong64.
+
+When default asset matching finds multiple candidates, `grd` prints matching assets and exits non-zero. Use filters or `--select` to choose interactively.
 
 ## Building
 

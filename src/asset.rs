@@ -318,11 +318,24 @@ fn collect_selection<'a>(assets: &'a [&'a Asset]) -> Result<&'a Asset> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    Default,
+    Filtered,
+    All,
+}
+
 #[derive(Debug)]
 pub enum Selection {
     Exact(Asset),
     Multiple(Vec<Asset>),
     None,
+}
+
+#[derive(Debug)]
+pub enum AssetSelection {
+    Single(Asset),
+    Multiple(Vec<Asset>),
 }
 
 pub fn find_asset(
@@ -386,68 +399,65 @@ pub fn select_asset(
     assets: &[Asset],
     os: &str,
     arch: &str,
-    force_select: bool,
+    mode: SelectMode,
     exclude: Option<&str>,
     no_ext_filter: bool,
-) -> Result<Asset> {
+) -> Result<AssetSelection> {
     let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
     let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
     let normalized_arch = canonical_arch_for_matching(arch);
     let effective_arch = inferred_arch.or(Some(normalized_arch));
+    let arch_ref = effective_arch.as_deref().unwrap_or(arch);
 
-    if force_select {
-        if !io::stdin().is_terminal() {
-            bail!("Cannot select asset in non-terminal environment");
-        }
-        return interactive_select(
-            assets,
-            &blacklist,
-            &normalized_os,
-            &effective_arch,
-            arch,
-            "Select an asset:",
-            no_ext_filter,
-        );
+    if matches!(mode, SelectMode::Filtered | SelectMode::All) && !io::stdin().is_terminal() {
+        bail!("Cannot select asset in non-terminal environment");
     }
 
-    match find_asset(assets, os, arch, exclude, no_ext_filter) {
-        Selection::Exact(asset) => Ok(asset),
-        Selection::Multiple(matches) => {
-            if !io::stdin().is_terminal() {
-                bail!(
-                    "Multiple assets found for {}-{}. Refine your filters to select a single asset or run in an interactive terminal.",
-                    normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch)
-                );
-            }
-            let mut sorted = matches.iter().collect::<Vec<_>>();
-            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
-            sort_by_score(&mut sorted, &normalized_os, arch_ref);
-            println!("Multiple assets found for {normalized_os}-{arch_ref}. Select one:");
-            show_all_assets(&sorted, &normalized_os, arch_ref);
-            let selected = collect_selection(&sorted)?;
-            Ok(selected.clone())
+    match mode {
+        SelectMode::All => {
+            let selected = interactive_select(
+                assets,
+                &blacklist,
+                &normalized_os,
+                &effective_arch,
+                arch,
+                "Select an asset:",
+                no_ext_filter,
+            )?;
+            Ok(AssetSelection::Single(selected))
         }
-        Selection::None => {
-            if !io::stdin().is_terminal() {
-                bail!(
-                    "No matching asset found for {}-{}. Run in an interactive terminal to select from available assets, or refine your filters.",
-                    normalized_os,
-                    effective_arch.as_deref().unwrap_or(arch)
-                );
-            }
-            let mut all: Vec<&Asset> = assets.iter().collect();
-            let arch_ref = effective_arch.as_deref().unwrap_or(arch);
-            sort_by_score(&mut all, &normalized_os, arch_ref);
-            println!(
-                "No matching asset found for {normalized_os}-{arch_ref}. Select from available assets:"
+        SelectMode::Filtered => {
+            let mut matches = collect_matches(
+                assets,
+                &blacklist,
+                &normalized_os,
+                &effective_arch,
+                no_ext_filter,
             );
-            show_all_assets(&all, &normalized_os, arch_ref);
-            let selected = collect_selection(&all)?;
-            Ok(selected.clone())
+            if matches.is_empty() {
+                bail!("No matching asset found for {normalized_os}-{arch_ref}");
+            }
+            sort_by_score(&mut matches, &normalized_os, arch_ref);
+            println!("Select a matching asset:");
+            show_all_assets(&matches, &normalized_os, arch_ref);
+            let selected = collect_selection(&matches)?;
+            Ok(AssetSelection::Single(selected.clone()))
         }
+        SelectMode::Default => match find_asset(assets, os, arch, exclude, no_ext_filter) {
+            Selection::Exact(asset) => Ok(AssetSelection::Single(asset)),
+            Selection::Multiple(matches) => {
+                let mut sorted = matches.iter().collect::<Vec<_>>();
+                sort_by_score(&mut sorted, &normalized_os, arch_ref);
+                Ok(AssetSelection::Multiple(
+                    sorted.into_iter().cloned().collect(),
+                ))
+            }
+            Selection::None => {
+                bail!("No matching asset found for {normalized_os}-{arch_ref}")
+            }
+        },
     }
 }
 
@@ -1578,7 +1588,7 @@ mod tests {
         }];
         // Non-terminal + Selection::None path should bail; this validates the
         // signature accepts the new arg without breaking existing behavior.
-        let result = select_asset(&assets, "linux", "x86_64", false, None, false);
+        let result = select_asset(&assets, "linux", "x86_64", SelectMode::Default, None, false);
         assert!(result.is_err(), "expected Selection::None to bail");
     }
 
@@ -1590,7 +1600,57 @@ mod tests {
             size: 1024,
         }];
         // Non-terminal + Selection::Exact should succeed without prompting.
-        let result = select_asset(&assets, "linux", "x86_64", false, None, true).unwrap();
-        assert_eq!(result.name, "app-linux-x86_64.dmg");
+        let result =
+            select_asset(&assets, "linux", "x86_64", SelectMode::Default, None, true).unwrap();
+        let AssetSelection::Single(asset) = result else {
+            panic!("expected exact asset");
+        };
+        assert_eq!(asset.name, "app-linux-x86_64.dmg");
+    }
+
+    #[test]
+    fn test_select_asset_default_multiple_returns_selection() {
+        let assets = vec![
+            Asset {
+                name: "app-linux-x86_64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app1.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-linux-amd64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app2.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = select_asset(&assets, "linux", "x86_64", SelectMode::Default, None, false)
+            .expect("default multiple should return list");
+        let AssetSelection::Multiple(matches) = result else {
+            panic!("expected multiple assets");
+        };
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_select_asset_filtered_requires_terminal() {
+        let assets = vec![Asset {
+            name: "app-linux-x86_64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let err = select_asset(
+            &assets,
+            "linux",
+            "x86_64",
+            SelectMode::Filtered,
+            None,
+            false,
+        )
+        .expect_err("filtered mode should require terminal before prompting");
+        assert!(
+            err.to_string()
+                .contains("Cannot select asset in non-terminal environment")
+        );
     }
 }

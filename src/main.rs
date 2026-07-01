@@ -146,19 +146,41 @@ fn main() -> Result<()> {
         println!("Using platform: {}-{}", os, arch);
     }
 
-    let asset = asset::select_asset(
+    let select_mode = if args.select_all {
+        asset::SelectMode::All
+    } else if args.select {
+        asset::SelectMode::Filtered
+    } else {
+        asset::SelectMode::Default
+    };
+
+    let asset = match asset::select_asset(
         &release.assets,
         &os,
         &arch,
-        args.select,
+        select_mode,
         args.exclude.as_deref(),
         args.no_ext_filter,
     )
     .inspect_err(|_| {
         if args.select {
             eprintln!("Note: --select flag was used but manual selection failed");
+        } else if args.select_all {
+            eprintln!("Note: --select-all flag was used but manual selection failed");
         }
-    })?;
+    })? {
+        asset::AssetSelection::Single(asset) => asset,
+        asset::AssetSelection::Multiple(matches) => {
+            let listing = matches
+                .iter()
+                .map(|a| format!("  - {}", a.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Multiple assets found for {os}-{arch}. Refine filters or pass --select to choose interactively:\n{listing}"
+            );
+        }
+    };
     println!("Selected asset: {}", asset.name);
 
     let bin_name = args
