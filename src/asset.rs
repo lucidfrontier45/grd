@@ -3,7 +3,7 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::github::Asset;
 
@@ -76,8 +76,9 @@ pub fn normalize_arch(input: &str) -> Result<String> {
     match normalized.as_str() {
         "x86_64" | "amd64" | "x64" => Ok("x86_64".to_string()),
         "aarch64" | "arm64" => Ok("aarch64".to_string()),
+        "loong64" | "loongarch64" => Ok("loong64".to_string()),
         _ => bail!(
-            "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64)",
+            "Invalid architecture '{}'. Supported: x86_64 (aliases: amd64, x64), aarch64 (alias: arm64), loong64 (alias: loongarch64)",
             input
         ),
     }
@@ -100,6 +101,8 @@ fn has_explicit_arch_pattern(name: &str) -> bool {
         || name.contains("x64")
         || name.contains("aarch64")
         || name.contains("arm64")
+        || name.contains("loong64")
+        || name.contains("loongarch64")
         || name.contains("i686")
         || name.contains("i386")
         || name.contains("armhf")
@@ -195,6 +198,7 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
     let arch_patterns = match target_arch {
         "x86_64" => vec!["x86_64", "amd64", "x64", "win64"],
         "aarch64" => vec!["aarch64", "arm64"],
+        "loong64" => vec!["loong64", "loongarch64"],
         _ => vec![],
     };
 
@@ -532,6 +536,12 @@ fn collect_matches<'a>(
                         || (!has_explicit_arch_pattern(&name)
                             && default_arch_for_os(normalized_os) == Some("aarch64"))
                 }
+                Some("loong64") => {
+                    name.contains("loong64")
+                        || name.contains("loongarch64")
+                        || (!has_explicit_arch_pattern(&name)
+                            && default_arch_for_os(normalized_os) == Some("loong64"))
+                }
                 _ => false,
             };
             ext_ok && os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
@@ -570,6 +580,8 @@ mod tests {
         assert_eq!(normalize_arch("aarch64").unwrap(), "aarch64");
         assert_eq!(normalize_arch("arm64").unwrap(), "aarch64");
         assert_eq!(normalize_arch("ARM64").unwrap(), "aarch64");
+        assert_eq!(normalize_arch("loong64").unwrap(), "loong64");
+        assert_eq!(normalize_arch("loongarch64").unwrap(), "loong64");
     }
 
     #[test]
@@ -628,6 +640,33 @@ mod tests {
             matches!(result, Selection::None),
             "darwin assets should NOT match win64"
         );
+    }
+
+    #[test]
+    fn test_select_asset_loong64_not_matched_to_x86_64() {
+        let assets = vec![Asset {
+            name: "app-linux-loong64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
+        assert!(
+            matches!(result, Selection::None),
+            "loong64 assets should NOT match x86_64"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_loong64_matches_loong64() {
+        let assets = vec![Asset {
+            name: "app-linux-loong64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/app.tar.gz".to_string(),
+            size: 1024,
+        }];
+
+        let result = find_asset(&assets, "linux", "loong64", None, false);
+        assert!(matches!(result, Selection::Exact(_)));
     }
 
     #[test]

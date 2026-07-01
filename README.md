@@ -258,7 +258,7 @@ repository in `~/.grd/state.toml`:
 - `--force`: Skip the version cache check and force a fresh download.
 - `-y / --yes`: Skip the upgrade confirmation prompt.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
-- `--arch`: Target architecture (x86_64, aarch64, amd64, x64, arm64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64.
+- `--arch`: Target architecture (x86_64, aarch64, loong64, amd64, x64, arm64, loongarch64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64; loongarch64 → loong64.
 
 ## Building
 

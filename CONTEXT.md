@@ -20,6 +20,7 @@ The target CPU architecture for a binary asset. Supported values:
 |-----------|---------|
 | `x86_64`  | `amd64`, `x64` |
 | `aarch64` | `arm64` |
+| `loong64` | `loongarch64` |
 
 ### Default Architecture
 When an asset filename contains an OS indicator but **no explicit architecture**, `grd` assumes one:
@@ -32,12 +33,12 @@ When an asset filename contains an OS indicator but **no explicit architecture**
 
 This avoids false negatives for projects that omit the arch from asset names (common when only one arch is shipped).
 
-An asset that **does** contain an explicit arch pattern (e.g. `x86_64`, `aarch64`, `arm64`, `i386`, `armv7`) is always matched against its stated arch; the default-arch fallback only applies when no arch pattern is detected.
+An asset that **does** contain an explicit arch pattern (e.g. `x86_64`, `aarch64`, `arm64`, `loong64`, `i386`, `armv7`) is always matched against its stated arch; the default-arch fallback only applies when no arch pattern is detected.
 
 ### Known Architecture Patterns
 Release filenames commonly embed any of these substrings, which `has_explicit_arch_pattern` recognizes so that the default-arch fallback does not falsely match assets built for other architectures:
 
-- `x86_64`, `amd64`, `x64`, `aarch64`, `arm64`
+- `x86_64`, `amd64`, `x64`, `aarch64`, `arm64`, `loong64`, `loongarch64`
 - `i686`, `i386`, `x86` (32-bit x86)
 - `armhf`, `armv7` (32-bit ARM)
 - `riscv64`, `riscv32` (RISC-V)
