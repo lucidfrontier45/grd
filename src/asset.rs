@@ -3,7 +3,7 @@ use std::{
     io::{self, IsTerminal, Write},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 
 use crate::github::Asset;
 
@@ -246,6 +246,43 @@ fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
     });
 }
 
+fn best_unique_match<'a>(
+    assets: &[&'a Asset],
+    target_os: &str,
+    target_arch: &str,
+) -> Option<&'a Asset> {
+    let mut best: Option<(&'a Asset, i32)> = None;
+    let mut best_count = 0;
+
+    for asset in assets {
+        let score = calculate_match_score(&asset.name, target_os, target_arch);
+        match best {
+            None => {
+                best = Some((asset, score));
+                best_count = 1;
+            }
+            Some((_, best_score)) if score > best_score => {
+                best = Some((asset, score));
+                best_count = 1;
+            }
+            Some((_, best_score)) if score == best_score => {
+                best_count += 1;
+            }
+            _ => {}
+        }
+    }
+
+    if best_count == 1 {
+        best.map(|(asset, _)| asset)
+    } else {
+        None
+    }
+}
+
+fn canonical_arch_for_matching(arch: &str) -> String {
+    normalize_arch(arch).unwrap_or_else(|_| arch.to_lowercase())
+}
+
 fn show_all_assets(assets: &[&Asset], target_os: &str, target_arch: &str) {
     for (i, asset) in assets.iter().enumerate() {
         let score = calculate_match_score(&asset.name, target_os, target_arch);
@@ -296,11 +333,12 @@ pub fn find_asset(
     });
 
     let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let normalized_arch = canonical_arch_for_matching(arch);
 
     let effective_arch = if inferred_arch.is_some() {
         inferred_arch
     } else {
-        Some(arch.to_string())
+        Some(normalized_arch)
     };
 
     let matches = collect_matches(
@@ -310,6 +348,14 @@ pub fn find_asset(
         &effective_arch,
         no_ext_filter,
     );
+
+    if let Some(asset) = best_unique_match(
+        &matches,
+        &normalized_os,
+        effective_arch.as_deref().unwrap_or(arch),
+    ) {
+        return Selection::Exact(asset.clone());
+    }
 
     if matches.len() > 1
         && normalized_os == "windows"
@@ -344,7 +390,8 @@ pub fn select_asset(
         s.split(',').map(|w| w.trim().to_lowercase()).collect()
     });
     let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
-    let effective_arch = inferred_arch.or(Some(arch.to_string()));
+    let normalized_arch = canonical_arch_for_matching(arch);
+    let effective_arch = inferred_arch.or(Some(normalized_arch));
 
     if force_select {
         if !io::stdin().is_terminal() {
@@ -726,6 +773,78 @@ mod tests {
 
         let result = find_asset(&assets, "linux", "x86_64", None, false);
         assert!(matches!(result, Selection::Multiple(_)));
+    }
+
+    #[test]
+    fn test_select_asset_prefers_linux_amd64_over_linux() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/linux.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-linux-amd64.tar.gz".to_string(),
+                browser_download_url: "https://example.com/linux-amd64.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "linux", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-linux-amd64.tar.gz")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_prefers_windows_amd64_over_windows() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-windows.zip".to_string(),
+                browser_download_url: "https://example.com/windows.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-windows-amd64.zip".to_string(),
+                browser_download_url: "https://example.com/windows-amd64.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "windows", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-windows-amd64.zip")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_prefers_win64_over_windows() {
+        let assets = vec![
+            Asset {
+                name: "golangci-lint-2.12.2-windows.zip".to_string(),
+                browser_download_url: "https://example.com/windows.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "golangci-lint-2.12.2-win64.zip".to_string(),
+                browser_download_url: "https://example.com/win64.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "win64", "amd64", None, false);
+        match result {
+            Selection::Exact(asset) => {
+                assert_eq!(asset.name, "golangci-lint-2.12.2-win64.zip")
+            }
+            _ => panic!("Expected Selection::Exact"),
+        }
     }
 
     #[test]
@@ -1166,12 +1285,8 @@ mod tests {
         ];
         let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
-            Selection::Multiple(mut matches) => {
-                let mut refs: Vec<&Asset> = matches.iter().collect();
-                sort_by_score(&mut refs, "linux", "x86_64");
-                assert_eq!(refs[0].name, "app-linux-x86_64.tar.gz");
-            }
-            _ => panic!("Expected Selection::Multiple"),
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-linux-x86_64.tar.gz"),
+            _ => panic!("Expected Selection::Exact"),
         }
     }
 
