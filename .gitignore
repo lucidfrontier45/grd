@@ -27,3 +27,4 @@ target
 .env
 .codegraph
 .pi/
+.todos/
