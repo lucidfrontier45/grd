@@ -117,6 +117,22 @@ fn has_explicit_arch_pattern(name: &str) -> bool {
         || name.contains("win64")
         || name.contains("win32")
         || name.contains("x86")
+        // 32-bit ARM: a bare `arm` token or an ARM EABI triple. sharkdp/fd
+        // ships `arm-unknown-linux-gnueabihf` / `arm-unknown-linux-musleabihf`;
+        // without recognizing these as explicit archs, the linux default-arch
+        // fallback (x86_64) would match them for linux/x86_64 targets.
+        || has_bare_arm_token(&name)
+        || name.contains("gnueabi")
+        || name.contains("musleabi")
+}
+
+/// True when `name` contains `arm` as a standalone token (delimited by
+/// non-alphanumerics), e.g. `tool-1.2.3-arm-linux.tar.gz` or
+/// `tool-arm.unknown.linux.gnueabihf.tar.gz`. A bare `arm` token in a release
+/// filename means the ARM architecture; it is not part of another word.
+fn has_bare_arm_token(name: &str) -> bool {
+    name.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok == "arm")
 }
 
 fn default_arch_for_os(os: &str) -> Option<&'static str> {
@@ -1697,5 +1713,155 @@ mod tests {
             err.to_string()
                 .contains("Cannot select asset in non-terminal environment")
         );
+    }
+
+    // --------------- sharkdp/fd ARM regression tests ---------------
+    //
+    // fd (sharkdp/fd v10.4.2) ships 32-bit ARM builds named
+    // `arm-unknown-linux-gnueabihf` / `arm-unknown-linux-musleabihf`. These
+    // must never be selected for a linux/x86_64 target: the bare `arm` token
+    // (and the EABI triples) are explicit archs, so the default-arch fallback
+    // (x86_64 for linux) must not apply to them.
+
+    /// Exact asset list of sharkdp/fd v10.4.2 (from the GitHub release API).
+    fn fd_v10_4_2_assets() -> Vec<Asset> {
+        [
+            "fd-musl_10.4.2_amd64.deb",
+            "fd-musl_10.4.2_arm64.deb",
+            "fd-musl_10.4.2_armhf.deb",
+            "fd-musl_10.4.2_i686.deb",
+            "fd-v10.4.2-aarch64-apple-darwin.tar.gz",
+            "fd-v10.4.2-aarch64-pc-windows-msvc.zip",
+            "fd-v10.4.2-aarch64-unknown-linux-gnu.tar.gz",
+            "fd-v10.4.2-aarch64-unknown-linux-musl.tar.gz",
+            "fd-v10.4.2-arm-unknown-linux-gnueabihf.tar.gz",
+            "fd-v10.4.2-arm-unknown-linux-musleabihf.tar.gz",
+            "fd-v10.4.2-i686-pc-windows-msvc.zip",
+            "fd-v10.4.2-i686-unknown-linux-gnu.tar.gz",
+            "fd-v10.4.2-i686-unknown-linux-musl.tar.gz",
+            "fd-v10.4.2-x86_64-pc-windows-gnu.zip",
+            "fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+            "fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz",
+            "fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz",
+            "fd_10.4.2_amd64.deb",
+            "fd_10.4.2_arm64.deb",
+            "fd_10.4.2_armhf.deb",
+            "fd_10.4.2_i686.deb",
+        ]
+        .into_iter()
+        .map(|name| Asset {
+            name: name.to_string(),
+            browser_download_url: format!(
+                "https://github.com/sharkdp/fd/releases/download/v10.4.2/{name}"
+            ),
+            size: 1024,
+        })
+        .collect()
+    }
+
+    fn assert_not_arm(asset: &Asset, context: &str) {
+        let n = asset.name.to_lowercase();
+        assert!(
+            !(n.contains("aarch64")
+                || n.contains("arm64")
+                || n.contains("-arm-")
+                || n.contains("gnueabi")
+                || n.contains("musleabi")
+                || n.contains("armhf")
+                || n.contains("armv7")),
+            "{context}: ARM artifact '{}' must never be selected for linux/x86_64",
+            asset.name
+        );
+    }
+
+    #[test]
+    fn test_fd_release_linux_x86_64_never_selects_arm() {
+        let assets = fd_v10_4_2_assets();
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
+        match result {
+            Selection::Exact(asset) => assert_not_arm(&asset, "Exact"),
+            Selection::Multiple(matches) => {
+                // Only the two x86_64 linux builds (gnu + musl) may match; the
+                // aarch64, 32-bit arm, i686, darwin and windows artifacts are
+                // all excluded for a linux/x86_64 target.
+                assert_eq!(
+                    matches.len(),
+                    2,
+                    "only x86_64 linux builds may match, got: {matches:?}"
+                );
+                let names: Vec<&str> = matches.iter().map(|a| a.name.as_str()).collect();
+                assert!(names.contains(&"fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz"));
+                assert!(names.contains(&"fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz"));
+                for asset in &matches {
+                    assert_not_arm(asset, "Multiple");
+                }
+            }
+            Selection::None => panic!("expected x86_64 linux builds to match"),
+        }
+    }
+
+    #[test]
+    fn test_fd_arm_gnueabihf_alone_not_selected_for_x86_64() {
+        let assets = vec![Asset {
+            name: "fd-v10.4.2-arm-unknown-linux-gnueabihf.tar.gz".to_string(),
+            browser_download_url: "https://example.com/fd-arm.tar.gz".to_string(),
+            size: 1024,
+        }];
+        assert!(
+            matches!(
+                find_asset(&assets, "linux", "x86_64", None, false),
+                Selection::None
+            ),
+            "arm-unknown-linux-gnueabihf is 32-bit ARM and must not satisfy linux/x86_64"
+        );
+    }
+
+    #[test]
+    fn test_fd_arm_musleabihf_alone_not_selected_for_x86_64() {
+        let assets = vec![Asset {
+            name: "fd-v10.4.2-arm-unknown-linux-musleabihf.tar.gz".to_string(),
+            browser_download_url: "https://example.com/fd-arm-musl.tar.gz".to_string(),
+            size: 1024,
+        }];
+        assert!(
+            matches!(
+                find_asset(&assets, "linux", "x86_64", None, false),
+                Selection::None
+            ),
+            "arm-unknown-linux-musleabihf is 32-bit ARM and must not satisfy linux/x86_64"
+        );
+    }
+
+    #[test]
+    fn test_fd_arm_asset_not_selected_for_aarch64_either() {
+        // 32-bit ARM (arm-*) is a different architecture than 64-bit aarch64.
+        let assets = vec![Asset {
+            name: "fd-v10.4.2-arm-unknown-linux-gnueabihf.tar.gz".to_string(),
+            browser_download_url: "https://example.com/fd-arm.tar.gz".to_string(),
+            size: 1024,
+        }];
+        assert!(
+            matches!(
+                find_asset(&assets, "linux", "aarch64", None, false),
+                Selection::None
+            ),
+            "32-bit arm must not satisfy aarch64 either"
+        );
+    }
+
+    #[test]
+    fn test_bare_arm_token_is_explicit_arch() {
+        assert!(has_explicit_arch_pattern("tool-1.2.3-arm-linux.tar.gz"));
+        assert!(has_explicit_arch_pattern(
+            "tool-arm.unknown.linux.gnueabihf.tar.gz"
+        ));
+        assert!(has_explicit_arch_pattern("tool_v1_arm_linux.zip"));
+        assert!(has_explicit_arch_pattern(
+            "fd-v10.4.2-arm-unknown-linux-gnueabihf.tar.gz"
+        ));
+        // ...but never as a substring of another word
+        assert!(!has_explicit_arch_pattern("tool-v1-harmony-linux.tar.gz"));
+        assert!(!has_explicit_arch_pattern("tool-v1-warm-linux.tar.gz"));
+        assert!(!has_explicit_arch_pattern("app-linux-musl.tar.gz"));
     }
 }

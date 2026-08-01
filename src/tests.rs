@@ -30,6 +30,51 @@ fn test_select_asset_from_real_repo() {
     }
 }
 
+/// Goal regression against the real sharkdp/fd release: for a linux/x86_64
+/// target, no ARM artifact (aarch64, arm64, 32-bit arm, EABI triples) may
+/// appear among the selected matches. Pinned to v10.4.2 for determinism.
+#[test]
+fn test_fd_real_repo_linux_x86_64_no_arm_artifact() {
+    let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+    let token = get_auth_token();
+    let agent = configure_agent(&ua, token.as_deref());
+
+    let release = fetch_release_info(&agent, "sharkdp/fd", Some("v10.4.2")).unwrap();
+    let result = find_asset(&release.assets, "linux", "x86_64", None, false);
+
+    let is_arm = |name: &str| {
+        let n = name.to_lowercase();
+        n.contains("aarch64")
+            || n.contains("arm64")
+            || n.contains("-arm-")
+            || n.contains("gnueabi")
+            || n.contains("musleabi")
+            || n.contains("armhf")
+            || n.contains("armv7")
+    };
+    match result {
+        Selection::Exact(asset) => {
+            assert!(
+                !is_arm(&asset.name),
+                "ARM artifact selected: {}",
+                asset.name
+            )
+        }
+        Selection::Multiple(matches) => {
+            let names: Vec<&str> = matches.iter().map(|a| a.name.as_str()).collect();
+            assert!(
+                names.iter().all(|n| !is_arm(n)),
+                "ARM artifact in linux/x86_64 matches: {names:?}"
+            );
+            assert!(
+                names.iter().any(|n| n.contains("x86_64-unknown-linux")),
+                "x86_64 linux build missing from matches: {names:?}"
+            );
+        }
+        Selection::None => panic!("no linux x86_64 match for sharkdp/fd v10.4.2"),
+    }
+}
+
 #[test]
 fn test_integration_download_extract_save() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
