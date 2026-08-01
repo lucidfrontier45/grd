@@ -109,7 +109,9 @@ fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(state::State::default_install_path),
     };
-    fs::create_dir_all(&dest).context("Failed to create destination directory")?;
+    if !args.dry_run {
+        fs::create_dir_all(&dest).context("Failed to create destination directory")?;
+    }
 
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
     let token = config::get_auth_token();
@@ -187,6 +189,38 @@ fn main() -> Result<()> {
         .bin_name
         .clone()
         .unwrap_or_else(|| repo.split('/').next_back().unwrap_or("app").to_string());
+
+    if args.dry_run {
+        let target_path = if args.no_decompress {
+            dest.join(&asset.name)
+        } else if cfg!(windows) {
+            dest.join(format!("{}.exe", bin_name))
+        } else {
+            dest.join(&bin_name)
+        };
+        let cache = state::State::load();
+        let cached = cache.get_cached(repo);
+        let is_same_version =
+            cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
+
+        if !args.force && target_path.exists() && is_same_version {
+            println!(
+                "[dry-run] already at {} {}; no action",
+                asset.name, release.tag_name
+            );
+            return Ok(());
+        }
+        println!(
+            "[dry-run] would install '{}' to {}",
+            bin_name,
+            dest.display()
+        );
+        println!(
+            "[dry-run] source: {} {} → {}",
+            repo, release.tag_name, asset.name
+        );
+        return Ok(());
+    }
 
     if !args.force {
         let target_path = if args.no_decompress {

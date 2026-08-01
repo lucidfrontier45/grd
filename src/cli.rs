@@ -43,6 +43,10 @@ pub struct Args {
     #[arg(long)]
     pub force: bool,
 
+    #[arg(long)]
+    /// Simulate installation without downloading
+    pub dry_run: bool,
+
     #[arg(short = 'y', long)]
     pub yes: bool,
 
@@ -108,6 +112,18 @@ mod tests {
     fn test_force_flag_parses_as_true() {
         let args = Args::parse_from(["grd", "owner/repo", "--force"]);
         assert!(args.force);
+    }
+
+    #[test]
+    fn test_dry_run_flag_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn test_dry_run_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--dry-run"]);
+        assert!(args.dry_run);
     }
 
     #[test]
