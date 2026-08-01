@@ -41,6 +41,7 @@ Release filenames commonly embed any of these substrings, which `has_explicit_ar
 - `x86_64`, `amd64`, `x64`, `aarch64`, `arm64`, `loong64`, `loongarch64`
 - `i686`, `i386`, `x86` (32-bit x86)
 - `armhf`, `armv7` (32-bit ARM)
+- bare `arm` token and `gnueabi`/`musleabi` triples (e.g. `arm-unknown-linux-gnueabihf`, `arm-unknown-linux-musleabihf` — the naming sharkdp/fd uses for 32-bit ARM)
 - `riscv64`, `riscv32` (RISC-V)
 - `ppc64le`, `ppc64`, `powerpc` (PowerPC)
 - `s390x` (IBM Z)
