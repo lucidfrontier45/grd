@@ -60,7 +60,54 @@ GITHUB_PAT=your_token_here
 
 The `GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
 
-### Basic Commands
+## Subcommands
+
+### `register`
+
+Set a default install directory for future downloads (persisted in state cache):
+
+```bash
+grd register /usr/local/bin
+```
+
+### `info`
+
+Show detailed information about an installed package (from cache):
+
+```bash
+grd info owner/repo
+```
+
+Output format is machine-parseable key=value pairs separated by semicolons:
+```
+repo=owner/repo;tag=v1.0.0;asset=app-linux-x86_64.tar.gz;destination=/usr/local/bin;binary=/usr/local/bin/app;binary_exists=true
+```
+
+### `remove`
+
+Remove an installed package and its state cache entry:
+
+```bash
+grd remove owner/repo
+```
+
+### `list-installed`
+
+List all previously installed packages (from cache):
+
+```bash
+grd list-installed
+```
+
+### `list-platform`
+
+List supported platform targets (OS/arch combinations):
+
+```bash
+grd list-platform
+```
+
+## Basic Commands
 
 Download the latest release of a repository:
 
@@ -78,6 +125,18 @@ List available versions:
 
 ```bash
 grd owner/repo --list
+```
+
+List all previously installed packages (from cache):
+
+```bash
+grd list-installed
+```
+
+List supported platform targets:
+
+```bash
+grd list-platform
 ```
 
 Specify destination directory:
@@ -106,6 +165,12 @@ Download without decompressing/extracting:
 grd owner/repo --no-decompress
 ```
 
+Disable the default extension allowlist (see [Extension Filter](#extension-filter) below):
+
+```bash
+grd owner/repo --no-ext-filter
+```
+
 
 
 ## Memory Usage
@@ -113,6 +178,47 @@ grd owner/repo --no-decompress
 - Downloads smaller than the memory limit are loaded entirely into RAM for processing.
 - Larger downloads use temporary files to avoid excessive memory consumption.
 - The default limit is 100MB, but can be adjusted with `--memory-limit`.
+
+## Extension Filter
+
+To avoid matching non-binary artifacts (checksums, signatures, license files,
+manifests, package formats like `.dmg`/`.deb`/`.rpm`), `grd` applies a default
+allowlist to asset names before OS/arch scoring.
+
+**Default allowlist** (case-insensitive):
+
+- `.exe`
+- `.zip`
+- `.tar.gz`
+- `.tgz`
+- `.tar.xz`
+
+**Always allowed**, regardless of allowlist:
+
+- Assets with **no extension** (e.g. `LICENSE`, `README`, `app`).
+- Assets whose trailing dot-segments are **version literals** (e.g. `app-1.2.3`,
+  `cli-rc1`, `myapp-v2.0.0-linux-x86_64`). A trailing segment counts as a
+  version literal iff it contains at least one non-letter character; pure-letter
+  segments (`gz`, `zip`, `dmg`, …) are always treated as extensions.
+
+**Behavior change**: assets with `.dmg`, `.deb`, `.rpm`, `.pkg`, `.msi`,
+`.AppImage`, `.sha256`, `.sig`, `.asc`, `.txt`, `.json`, `.yaml`, `.blockmap`,
+`.pdb`, `.map`, `.wasm`, etc. no longer match by default — even when their
+filename embeds OS/arch tokens. For example, `app-linux-x86_64.tar.gz.sha256`
+is **filtered out** under the default behavior.
+
+**Opt-out with `--no-ext-filter`**: a full opt-out (not a partial filter). All
+extensions pass through to OS/arch scoring. With `--no-ext-filter`, the same
+`app-linux-x86_64.tar.gz.sha256` asset would be kept as a candidate because it
+contains `linux` + `x86_64`, yielding `Selection::Multiple` rather than `Exact`.
+
+```bash
+grd owner/repo --no-ext-filter
+```
+
+Note: `--no-ext-filter` only affects asset selection. The download/extraction
+pipeline still only knows the 5 allowlisted formats above; selecting an
+unrecognized format is the user's explicit opt-in.
 
 ## Version Cache
 
@@ -130,22 +236,34 @@ repository in `~/.grd/state.toml`:
 - **Format**: TOML keyed by `"owner/repo"`:
   ```toml
   [versions]
-  "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz" }
+  "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz", destination = "/usr/local/bin" }
   ```
+  - `destination` is mandatory and records where the binary was installed.
+  - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
 
 ## Options
 
 - `repo`: GitHub repository (owner/repo)
 - `--tag`: Specific version tag (defaults to latest)
+- `list-installed`: List all previously downloaded releases from the local cache
+- `list-platform`: Display supported OS/architecture combinations
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
 - `--bin-name`: Override executable name
-- `--select`: Force manual selection from all available assets
+- `--select`: Force manual selection from filtered (OS/arch-matched) candidates
+- `--select-all`: Force manual selection from all available assets (ignores OS/arch filter)
 - `--exclude`: Comma-separated words to exclude from asset matching
 - `--no-decompress`: Save downloaded file without decompressing/extracting it
+- `--no-ext-filter`: Disable the default extension allowlist (see Extension Filter below)
 - `--memory-limit`: Memory limit in bytes; downloads larger than this use temp files (default: 104857600, i.e., 100MB)
+- `--force`: Skip the version cache check and force a fresh download.
+- `--dry-run`: Simulate installation without downloading. Resolves the release and asset, reports what would happen (e.g., `[dry-run] would install 'grd' to /usr/local/bin`), and exits without downloading, extracting, creating directories, or writing state. Never prompts; ignores `--force`.
+
+- `-y / --yes`: Skip the upgrade confirmation prompt.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
-- `--arch`: Target architecture (x86_64, aarch64, amd64, x64, arm64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64.
+- `--arch`: Target architecture (x86_64, aarch64, loong64, amd64, x64, arm64, loongarch64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64; loongarch64 → loong64.
+
+When default asset matching finds multiple candidates, `grd` prints matching assets and exits non-zero. Use filters or `--select` to choose interactively.
 
 ## Building
 

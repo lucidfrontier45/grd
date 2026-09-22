@@ -25,3 +25,6 @@ target
 
 /target
 .env
+.codegraph
+.pi/
+.todos/

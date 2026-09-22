@@ -1,11 +1,14 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "GitHub Release Downloader")]
 pub struct Args {
-    pub repo: String,
+    pub repo: Option<String>,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
     #[arg(short, long)]
     pub tag: Option<String>,
@@ -13,20 +16,26 @@ pub struct Args {
     #[arg(short, long)]
     pub list: bool,
 
-    #[arg(short, long, default_value = ".")]
-    pub destination: PathBuf,
+    #[arg(short, long)]
+    pub destination: Option<PathBuf>,
 
     #[arg(short, long)]
     pub bin_name: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "select_all")]
     pub select: bool,
+
+    #[arg(long, conflicts_with = "select")]
+    pub select_all: bool,
 
     #[arg(long)]
     pub exclude: Option<String>,
 
     #[arg(long = "no-decompress")]
     pub no_decompress: bool,
+
+    #[arg(long = "no-ext-filter")]
+    pub no_ext_filter: bool,
 
     #[arg(short = 'm', long = "memory-limit", default_value = "104857600")]
     pub memory_limit: u64,
@@ -35,18 +44,63 @@ pub struct Args {
     pub force: bool,
 
     #[arg(long)]
+    /// Simulate installation without downloading
+    pub dry_run: bool,
+
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+
+    #[arg(long)]
     pub os: Option<String>,
 
     #[arg(long)]
     pub arch: Option<String>,
+}
 
-    #[arg(long)]
-    pub list_platforms: bool,
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Register a default install directory for future downloads
+    Register {
+        /// Default installation path
+        path: PathBuf,
+    },
+    /// Remove an installed package
+    Remove {
+        /// Repository name (e.g., owner/repo)
+        repo: String,
+    },
+    /// Show detailed information about an installed package
+    Info {
+        /// Repository name (e.g., owner/repo)
+        repo: String,
+    },
+    /// List installed packages
+    ListInstalled,
+    /// List supported platforms
+    ListPlatform,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_yes_flag_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.yes);
+    }
+
+    #[test]
+    fn test_yes_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--yes"]);
+        assert!(args.yes);
+    }
+
+    #[test]
+    fn test_yes_flag_short() {
+        let args = Args::parse_from(["grd", "owner/repo", "-y"]);
+        assert!(args.yes);
+    }
 
     #[test]
     fn test_force_flag_defaults_to_false() {
@@ -58,5 +112,95 @@ mod tests {
     fn test_force_flag_parses_as_true() {
         let args = Args::parse_from(["grd", "owner/repo", "--force"]);
         assert!(args.force);
+    }
+
+    #[test]
+    fn test_dry_run_flag_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.dry_run);
+    }
+
+    #[test]
+    fn test_dry_run_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--dry-run"]);
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn test_info_subcommand_parses() {
+        let args = Args::parse_from(["grd", "info", "owner/repo"]);
+        assert!(args.command.is_some());
+        let Command::Info { repo } = args.command.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(repo, "owner/repo");
+    }
+
+    #[test]
+    fn test_list_installed_subcommand_parses() {
+        let args = Args::parse_from(["grd", "list-installed"]);
+        assert!(args.command.is_some());
+        assert!(matches!(args.command, Some(Command::ListInstalled)));
+    }
+
+    #[test]
+    fn test_list_platform_subcommand_parses() {
+        let args = Args::parse_from(["grd", "list-platform"]);
+        assert!(args.command.is_some());
+        assert!(matches!(args.command, Some(Command::ListPlatform)));
+    }
+
+    #[test]
+    fn test_register_subcommand_parses() {
+        let args = Args::parse_from(["grd", "register", "/usr/local/bin"]);
+        assert!(args.repo.is_none());
+        assert!(args.command.is_some());
+        let Command::Register { path } = args.command.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(path, PathBuf::from("/usr/local/bin"));
+    }
+
+    #[test]
+    fn test_register_subcommand_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn test_destination_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.destination.is_none());
+    }
+
+    #[test]
+    fn test_destination_flag_parses() {
+        let args = Args::parse_from(["grd", "owner/repo", "-d", "/tmp"]);
+        assert_eq!(args.destination, Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn test_no_ext_filter_defaults_to_false() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(!args.no_ext_filter);
+    }
+
+    #[test]
+    fn test_no_ext_filter_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--no-ext-filter"]);
+        assert!(args.no_ext_filter);
+    }
+
+    #[test]
+    fn test_select_all_flag_parses_as_true() {
+        let args = Args::parse_from(["grd", "owner/repo", "--select-all"]);
+        assert!(args.select_all);
+    }
+
+    #[test]
+    fn test_select_conflicts_with_select_all() {
+        let err = Args::try_parse_from(["grd", "owner/repo", "--select", "--select-all"])
+            .expect_err("--select and --select-all must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
