@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     if args.list {
         let releases = github::list_releases(&agent, &args.repo)?;
-        println!("Available releases for {}:", &args.repo);
+        println!("Available releases for {}:", args.repo);
         for rel in releases {
             println!("  - {}", rel.tag_name);
         }

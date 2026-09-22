@@ -10,6 +10,31 @@ fn is_rate_limited(status: u16) -> bool {
     status == 403
 }
 
+/// Validate that `repo` is a syntactically valid `owner/repo` identifier and
+/// return its components. Rejects characters that would be unsafe to interpolate
+/// directly into a URL path (whitespace, `#`, `?`, etc.).
+fn validate_repo(repo: &str) -> Result<(&str, &str)> {
+    let (owner, name) = repo.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!("Repository must be in 'owner/repo' format (got '{repo}')")
+    })?;
+
+    // GitHub allows alphanumeric, '.', '_', '-' in owner and repo names.
+    let is_valid_segment = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    };
+
+    if !is_valid_segment(owner) || !is_valid_segment(name) || name.contains('/') {
+        bail!(
+            "Invalid repository '{repo}'. Owner and repo must each contain only \
+             alphanumeric, '-', '_', or '.' characters."
+        );
+    }
+
+    Ok((owner, name))
+}
+
 #[derive(Deserialize, Debug)]
 pub struct Release {
     pub tag_name: String,
@@ -24,7 +49,8 @@ pub struct Asset {
 }
 
 pub fn list_releases(agent: &Agent, repo: &str) -> Result<Vec<Release>> {
-    let url = format!("https://api.github.com/repos/{}/releases", repo);
+    validate_repo(repo)?;
+    let url = format!("https://api.github.com/repos/{repo}/releases");
     let mut response = match agent.get(&url).call() {
         Ok(r) => r,
         Err(UreqError::StatusCode(status_code)) => {
@@ -50,9 +76,13 @@ pub fn list_releases(agent: &Agent, repo: &str) -> Result<Vec<Release>> {
 }
 
 pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Result<Release> {
+    validate_repo(repo)?;
     let url = match tag {
-        Some(t) => format!("https://api.github.com/repos/{}/releases/tags/{}", repo, t),
-        None => format!("https://api.github.com/repos/{}/releases/latest", repo),
+        Some(t) => format!(
+            "https://api.github.com/repos/{repo}/releases/tags/{}",
+            urlencoding::encode(t)
+        ),
+        None => format!("https://api.github.com/repos/{repo}/releases/latest"),
     };
 
     let mut response = match agent.get(&url).call() {
@@ -151,5 +181,56 @@ mod tests {
 
         let result = list_releases(&agent, "lucidfrontier45/grd");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_repo_valid() {
+        assert!(validate_repo("owner/repo").is_ok());
+        assert!(validate_repo("lucidfrontier45/grd").is_ok());
+        assert!(validate_repo("a.b-c_d/x.y-z_w").is_ok());
+        // Single-char segments are allowed by GitHub.
+        assert!(validate_repo("a/b").is_ok());
+    }
+
+    #[test]
+    fn test_validate_repo_missing_slash() {
+        assert!(validate_repo("owneronly").is_err());
+        assert!(validate_repo("").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_empty_component() {
+        assert!(validate_repo("/repo").is_err());
+        assert!(validate_repo("owner/").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_too_many_slashes() {
+        // Only the first slash splits; remaining slashes must not appear in name.
+        assert!(validate_repo("owner/repo/extra").is_err());
+    }
+
+    #[test]
+    fn test_validate_repo_unsafe_characters() {
+        assert!(validate_repo("own er/repo").is_err());
+        assert!(validate_repo("owner/re po").is_err());
+        assert!(validate_repo("owner/re#po").is_err());
+        assert!(validate_repo("owner/re?po").is_err());
+        assert!(validate_repo("owner/re%20po").is_err());
+        assert!(validate_repo("owner/repo/../etc").is_err());
+    }
+
+    #[test]
+    fn test_fetch_release_info_rejects_invalid_repo_before_network() {
+        // Should fail with a validation error, not a network error.
+        let ua = "test-agent";
+        let agent = configure_agent(ua, None);
+        let result = fetch_release_info(&agent, "invalid repo", None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Invalid repository") || msg.contains("'owner/repo' format"),
+            "expected validation error, got: {msg}"
+        );
     }
 }
