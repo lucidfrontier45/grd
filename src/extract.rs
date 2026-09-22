@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
+use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
 use crate::download::DownloadSource;
@@ -84,16 +85,26 @@ fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
 }
 
 fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
-    let mut rdr: Box<dyn io::BufRead> = match source {
+    // Stream-decompress xz into a temp file rather than buffering the entire
+    // decompressed archive in memory, so the user's --memory-limit setting is
+    // respected for .tar.xz payloads.
+    let mut compressed: Box<dyn io::BufRead> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::BufReader::new(io::Cursor::new(bytes))),
         DownloadSource::Disk(temp_file) => {
             Box::new(io::BufReader::new(File::open(temp_file.path())?))
         }
     };
-    let mut decompressed = Vec::new();
-    lzma_rs::xz_decompress(&mut rdr, &mut decompressed)
+
+    let mut decompressed =
+        NamedTempFile::new().context("Failed to create temp file for xz decompression")?;
+    lzma_rs::xz_decompress(&mut compressed, decompressed.as_file_mut())
         .context("Failed to decompress xz archive")?;
-    let mut archive = tar::Archive::new(io::Cursor::new(decompressed));
+    drop(compressed);
+
+    let tar_file = decompressed
+        .reopen()
+        .context("Failed to reopen decompressed tar for reading")?;
+    let mut archive = tar::Archive::new(tar_file);
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();

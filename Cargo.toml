@@ -24,6 +24,7 @@ tempfile = "3.24"
 ureq = { version = "3.1.4", features = ["rustls", "json"] }
 lzma-rs = "0.3"
 zip = "8.6.0"
+urlencoding = "2"
 
 [dev-dependencies]
 serde_json = "1.0"
