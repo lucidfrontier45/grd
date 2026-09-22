@@ -101,8 +101,9 @@ fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
         .context("Failed to decompress xz archive")?;
     drop(compressed);
 
-    let tar_file =
-        File::open(decompressed.path()).context("Failed to open decompressed tar for reading")?;
+    let tar_file = decompressed
+        .reopen()
+        .context("Failed to reopen decompressed tar for reading")?;
     let mut archive = tar::Archive::new(tar_file);
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;

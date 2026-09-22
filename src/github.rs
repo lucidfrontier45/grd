@@ -21,6 +21,8 @@ fn validate_repo(repo: &str) -> Result<(&str, &str)> {
     // GitHub allows alphanumeric, '.', '_', '-' in owner and repo names.
     let is_valid_segment = |s: &str| {
         !s.is_empty()
+            && s != "."
+            && s != ".."
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
     };
@@ -218,6 +220,8 @@ mod tests {
         assert!(validate_repo("owner/re?po").is_err());
         assert!(validate_repo("owner/re%20po").is_err());
         assert!(validate_repo("owner/repo/../etc").is_err());
+        assert!(validate_repo("../repo").is_err());
+        assert!(validate_repo("owner/..").is_err());
     }
 
     #[test]
