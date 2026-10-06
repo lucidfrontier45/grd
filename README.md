@@ -220,6 +220,25 @@ Note: `--no-ext-filter` only affects asset selection. The download/extraction
 pipeline still only knows the 5 allowlisted formats above; selecting an
 unrecognized format is the user's explicit opt-in.
 
+## libc Preference
+
+On Linux targets, when a release ships both a glibc (`gnu`) and a musl asset for
+the same architecture, `grd` picks the musl build. Musl binaries are statically
+linked against musl libc and tend to run on more Linux distributions than glibc
+builds do. Musl assets get a +1 scoring bonus on Linux only — Windows and macOS
+scores are untouched.
+
+The glibc asset stays visible under `--select`, listed just below the musl one:
+
+```bash
+grd owner/repo --select
+```
+
+**Opt-out with `--exclude`**: use `--exclude musl` to select the glibc build (and
+`--exclude gnu` to be explicit about wanting musl). Exclusion is applied before
+scoring, so it always wins over the preference. Matching is substring-based, so
+`--exclude musl` also drops `musleabi`-named assets.
+
 ## Version Cache
 
 To avoid redundant downloads, `grd` caches the last-downloaded release version per
@@ -264,6 +283,8 @@ repository in `~/.grd/state.toml`:
 - `--arch`: Target architecture (x86_64, aarch64, loong64, amd64, x64, arm64, loongarch64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64; loongarch64 → loong64.
 
 When default asset matching finds multiple candidates, `grd` prints matching assets and exits non-zero. Use filters or `--select` to choose interactively.
+
+Remaining ties are genuine ambiguity — for example two assets of the same score and arch that differ only by extension. A `gnu`/`musl` pair on Linux is **not** a tie any more: the musl asset wins (see [libc Preference](#libc-preference)).
 
 ## Building
 

@@ -135,6 +135,22 @@ fn has_bare_arm_token(name: &str) -> bool {
         .any(|tok| tok == "arm")
 }
 
+/// True when `name` mentions the musl libc (`musl`, `musleabi`, `musleabihf`).
+/// Substring matching is deliberate: it covers the EABI naming for free, since
+/// `musleabi` contains `musl`.
+fn has_musl_token(name: &str) -> bool {
+    name.contains("musl")
+}
+
+/// True when `name` mentions the glibc libc (`gnu`, `gnueabi`, `gnueabihf`).
+/// Same substring rationale as [`has_musl_token`]. Test-only: the scoring rules
+/// never demote glibc assets, so this exists to document the other half of the
+/// libc pair and to assert the glibc side in tests.
+#[cfg(test)]
+fn has_gnu_token(name: &str) -> bool {
+    name.contains("gnu")
+}
+
 fn default_arch_for_os(os: &str) -> Option<&'static str> {
     match os {
         "linux" => Some("x86_64"),
@@ -253,6 +269,15 @@ fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -
             score += 1;
             break;
         }
+    }
+
+    // On linux, prefer statically linked musl builds when a release ships both
+    // a glibc (`gnu`) and a musl asset for the same arch: the bonus breaks the
+    // tie so `best_unique_match` resolves it instead of yielding
+    // `Selection::Multiple`. No gnu penalty — a libc-neutral asset must not be
+    // demoted below glibc, which was not asked for.
+    if target_os == "linux" && has_musl_token(&name) {
+        score += 1;
     }
 
     score
@@ -840,6 +865,129 @@ mod tests {
             Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux-musl.tar.gz"),
             _ => panic!("Expected Selection::Exact"),
         }
+    }
+
+    #[test]
+    fn test_exclude_musl_selects_gnu_asset() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux-gnu.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux-musl.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "linux", "x86_64", Some("musl"), false);
+        match result {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux-gnu.tar.gz"),
+            other => panic!("Expected Selection::Exact for the gnu asset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_libc_token_helpers() {
+        assert!(has_musl_token("app-x86_64-linux-musl.tar.gz"));
+        assert!(has_musl_token("fd-arm-unknown-linux-musleabihf.tar.gz"));
+        assert!(!has_musl_token("app-x86_64-linux-gnu.tar.gz"));
+
+        assert!(has_gnu_token("app-x86_64-linux-gnu.tar.gz"));
+        assert!(has_gnu_token("fd-arm-unknown-linux-gnueabihf.tar.gz"));
+        assert!(!has_gnu_token("app-x86_64-linux-musl.tar.gz"));
+    }
+
+    #[test]
+    fn test_score_prefers_musl_over_gnu_on_linux() {
+        let musl = calculate_match_score("app-x86_64-unknown-linux-musl.tar.gz", "linux", "x86_64");
+        let gnu = calculate_match_score("app-x86_64-unknown-linux-gnu.tar.gz", "linux", "x86_64");
+
+        assert_eq!(gnu, 3, "gnu = 2 (exact os token) + 1 (arch token)");
+        assert_eq!(musl, 4, "musl = gnu + 1 musl bonus");
+        assert!(musl > gnu);
+    }
+
+    #[test]
+    fn test_musl_bonus_is_linux_only() {
+        let plain = calculate_match_score("x86_64-pc-windows-msvc.zip", "windows", "x86_64");
+        let musl_named = calculate_match_score("x86_64-pc-windows-musl.zip", "windows", "x86_64");
+
+        assert_eq!(
+            plain, musl_named,
+            "a `musl`-containing name must not gain a bonus on non-linux targets"
+        );
+        assert_eq!(musl_named, 3, "2 (exact os token) + 1 (arch token)");
+
+        let darwin =
+            calculate_match_score("tool-aarch64-apple-darwin-musl.tar.gz", "macos", "aarch64");
+        assert_eq!(
+            darwin, 2,
+            "macOS scores are unchanged: 1 (darwin os) + 1 (arch)"
+        );
+    }
+
+    #[test]
+    fn test_musleabi_outscores_gnueabi_on_linux() {
+        let musleabi =
+            calculate_match_score("fd-arm-unknown-linux-musleabihf.tar.gz", "linux", "aarch64");
+        let gnueabi =
+            calculate_match_score("fd-arm-unknown-linux-gnueabihf.tar.gz", "linux", "aarch64");
+
+        assert!(
+            musleabi > gnueabi,
+            "musleabi {musleabi} vs gnueabi {gnueabi}"
+        );
+        assert!(has_musl_token("fd-arm-unknown-linux-musleabihf.tar.gz"));
+    }
+
+    #[test]
+    fn test_find_asset_prefers_musl_over_gnu() {
+        for arch in ["x86_64", "aarch64"] {
+            let assets = vec![
+                Asset {
+                    name: format!("app-{arch}-unknown-linux-gnu.tar.gz"),
+                    browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
+                    size: 1024,
+                },
+                Asset {
+                    name: format!("app-{arch}-unknown-linux-musl.tar.gz"),
+                    browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                    size: 2048,
+                },
+            ];
+
+            match find_asset(&assets, "linux", arch, None, false) {
+                Selection::Exact(asset) => {
+                    assert_eq!(asset.name, format!("app-{arch}-unknown-linux-musl.tar.gz"));
+                }
+                other => panic!("{arch}: expected Selection::Exact(musl), got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_sort_by_score_places_musl_first() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-unknown-linux-musl.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let mut asset_refs: Vec<&Asset> = assets.iter().collect();
+        sort_by_score(&mut asset_refs, "linux", "x86_64");
+
+        assert_eq!(asset_refs[0].name, "app-x86_64-unknown-linux-musl.tar.gz");
+        assert_eq!(asset_refs[1].name, "app-x86_64-unknown-linux-gnu.tar.gz");
     }
 
     #[test]
@@ -1779,24 +1927,17 @@ mod tests {
         let assets = fd_v10_4_2_assets();
         let result = find_asset(&assets, "linux", "x86_64", None, false);
         match result {
-            Selection::Exact(asset) => assert_not_arm(&asset, "Exact"),
-            Selection::Multiple(matches) => {
-                // Only the two x86_64 linux builds (gnu + musl) may match; the
-                // aarch64, 32-bit arm, i686, darwin and windows artifacts are
-                // all excluded for a linux/x86_64 target.
-                assert_eq!(
-                    matches.len(),
-                    2,
-                    "only x86_64 linux builds may match, got: {matches:?}"
-                );
-                let names: Vec<&str> = matches.iter().map(|a| a.name.as_str()).collect();
-                assert!(names.contains(&"fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz"));
-                assert!(names.contains(&"fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz"));
-                for asset in &matches {
-                    assert_not_arm(asset, "Multiple");
-                }
+            // The gnu and musl x86_64 linux builds used to tie; the musl bonus
+            // now makes musl the unique winner, so this is an Exact match and
+            // never an ambiguous one.
+            Selection::Exact(asset) => {
+                assert_not_arm(&asset, "Exact");
+                assert_eq!(asset.name, "fd-v10.4.2-x86_64-unknown-linux-musl.tar.gz");
             }
-            Selection::None => panic!("expected x86_64 linux builds to match"),
+            Selection::Multiple(matches) => {
+                panic!("gnu/musl must no longer tie, got: {matches:?}");
+            }
+            Selection::None => panic!("expected an x86_64 linux build to match"),
         }
     }
 
