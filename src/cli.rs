@@ -22,6 +22,11 @@ pub struct Args {
     #[arg(short, long)]
     pub bin_name: Option<String>,
 
+    /// Rename the installed executable (does not change which file is
+    /// extracted from the archive)
+    #[arg(long)]
+    pub rename: Option<String>,
+
     #[arg(long, conflicts_with = "select_all")]
     pub select: bool,
 
@@ -202,5 +207,24 @@ mod tests {
         let err = Args::try_parse_from(["grd", "owner/repo", "--select", "--select-all"])
             .expect_err("--select and --select-all must conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_rename_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.rename.is_none());
+    }
+
+    #[test]
+    fn test_rename_flag_parses() {
+        let args = Args::parse_from(["grd", "owner/repo", "--rename", "renamed"]);
+        assert_eq!(args.rename.as_deref(), Some("renamed"));
+    }
+
+    #[test]
+    fn test_rename_coexists_with_bin_name() {
+        let args = Args::parse_from(["grd", "owner/prj", "--bin-name", "exe1", "--rename", "exe2"]);
+        assert_eq!(args.bin_name.as_deref(), Some("exe1"));
+        assert_eq!(args.rename.as_deref(), Some("exe2"));
     }
 }

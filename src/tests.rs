@@ -102,18 +102,67 @@ fn test_integration_download_extract_save() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
     let bin_name = "rg";
-
-    let result = extract_and_save(source, &asset.name, bin_name, dest_dir, false);
-    assert!(result.is_ok());
-
     let expected_name = if cfg!(windows) {
         format!("{}.exe", bin_name)
     } else {
         bin_name.to_string()
     };
 
+    let result = extract_and_save(
+        source,
+        &asset.name,
+        bin_name,
+        &expected_name,
+        dest_dir,
+        false,
+    );
+    assert!(result.is_ok());
+
     let extracted_path = dest_dir.join(&expected_name);
     assert!(extracted_path.exists());
+}
+
+/// `--rename` changes the on-disk filename without changing which archive
+/// entry is extracted.
+#[test]
+fn test_integration_download_extract_save_renamed() {
+    let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+    let token = get_auth_token();
+    let agent = configure_agent(&ua, token.as_deref());
+
+    let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
+    let os = env::consts::OS;
+    let arch = env::consts::ARCH;
+
+    let asset = match find_asset(&release.assets, os, arch, None, false) {
+        Selection::Exact(a) => a,
+        _ => {
+            println!("Skipping test: no unique match for {}-{}", os, arch);
+            return;
+        }
+    };
+
+    let memory_limit = 10 * 1024 * 1024;
+    let source = download_asset(&agent, &asset, memory_limit).unwrap();
+
+    let temp_dir = TempDir::new().unwrap();
+    let dest_dir = temp_dir.path();
+
+    let lookup_name = "rg";
+    let out_name = if cfg!(windows) {
+        "rg-renamed.exe"
+    } else {
+        "rg-renamed"
+    };
+
+    let result = extract_and_save(source, &asset.name, lookup_name, out_name, dest_dir, false);
+    assert!(result.is_ok());
+
+    assert!(dest_dir.join(out_name).exists(), "renamed binary missing");
+    assert!(
+        !dest_dir.join(lookup_name).exists(),
+        "the lookup name must not be written alongside the rename value"
+    );
 }
 
 #[test]
@@ -175,6 +224,7 @@ fn test_remove_deletes_file_and_state_entry() {
             "file.tar.gz",
             "v1.0.0",
             dir.path().display().to_string(),
+            if cfg!(windows) { "repo.exe" } else { "repo" },
         );
         state.save();
 
@@ -205,6 +255,7 @@ fn test_remove_warns_when_binary_missing() {
             "file.tar.gz",
             "v1.0.0",
             dir.path().display().to_string(),
+            if cfg!(windows) { "repo.exe" } else { "repo" },
         );
         state.save();
 
@@ -225,6 +276,61 @@ fn test_remove_warns_when_binary_missing() {
         assert!(!binary_path.exists());
         let loaded = State::load();
         assert!(loaded.get_cached("test/repo").is_none());
+    });
+}
+
+/// `remove` must target the recorded filename, not the repo basename — a
+/// custom `--rename` install is otherwise undeletable.
+#[test]
+fn test_remove_uses_recorded_renamed_filename() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_cached(
+            "test/repo",
+            "file.tar.gz",
+            "v1.0.0",
+            dir.path().display().to_string(),
+            "custom-name",
+        );
+        state.save();
+
+        let renamed_path = dir.path().join("custom-name");
+        std::fs::write(&renamed_path, "dummy").unwrap();
+
+        let mut cache = State::load();
+        let entry = cache.remove_cached("test/repo").unwrap();
+        let filename = entry.installed_filename("test/repo");
+        assert_eq!(filename, "custom-name");
+
+        let target = std::path::PathBuf::from(&entry.destination).join(&filename);
+        assert!(target.exists(), "recorded filename should resolve on disk");
+        std::fs::remove_file(&target).unwrap();
+        cache.save();
+
+        assert!(!renamed_path.exists());
+        assert!(State::load().get_cached("test/repo").is_none());
+    });
+}
+
+/// A legacy state entry (no `binary`) still resolves to the repo basename.
+#[test]
+fn test_remove_legacy_entry_without_binary() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        // Store the legacy TOML shape directly to guarantee no `binary` key.
+        let legacy = format!(
+            "[versions]\n\"test/repo\" = {{ tag = \"v1.0.0\", asset = \"file.tar.gz\", destination = {:?} }}\n",
+            dir.path().display().to_string()
+        );
+        std::fs::write(std::env::var("GRD_STATE_PATH").unwrap(), legacy).unwrap();
+
+        let mut cache = State::load();
+        let entry = cache.remove_cached("test/repo").unwrap();
+        assert!(entry.binary.is_none());
+
+        let expected = if cfg!(windows) { "repo.exe" } else { "repo" };
+        assert_eq!(entry.installed_filename("test/repo"), expected);
     });
 }
 
@@ -260,8 +366,14 @@ fn test_list_installed_displays_installed_packages() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", String::new());
-        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", String::new());
+        state.set_cached(
+            "owner/repo",
+            "foo-linux.tar.gz",
+            "v1.0.0",
+            String::new(),
+            "",
+        );
+        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", String::new(), "");
         state.save();
 
         let cache = State::load();
@@ -346,7 +458,7 @@ fn test_list_installed_does_not_modify_state() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
         state.save();
 
         let before = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
@@ -377,6 +489,7 @@ fn test_tag_cache_hit_conditions_met() {
             "asset.tar.gz",
             "v1.0.0",
             dest.to_str().unwrap().to_string(),
+            if cfg!(windows) { "repo.exe" } else { "repo" },
         );
         state.save();
 
@@ -413,6 +526,7 @@ fn test_tag_cache_miss_allows_download() {
             "asset.tar.gz",
             "v0.9.0",
             dest.to_str().unwrap().to_string(),
+            if cfg!(windows) { "repo.exe" } else { "repo" },
         );
         state.save();
 
@@ -446,6 +560,7 @@ fn test_tag_force_flag_bypasses_cache_check() {
             "asset.tar.gz",
             "v1.0.0",
             dest.to_str().unwrap().to_string(),
+            if cfg!(windows) { "repo.exe" } else { "repo" },
         );
         state.save();
 
@@ -463,7 +578,8 @@ fn test_info_subcommand_displays_cached_entry() {
     let dir = TempDir::new().unwrap();
     let dest = dir.path().join("bin");
     std::fs::create_dir_all(&dest).unwrap();
-    let binary_path = dest.join("myapp.exe");
+    let installed_name = if cfg!(windows) { "myapp.exe" } else { "myapp" };
+    let binary_path = dest.join(installed_name);
     std::fs::write(&binary_path, "fake binary").unwrap();
 
     with_state_path(&dir, || {
@@ -473,6 +589,7 @@ fn test_info_subcommand_displays_cached_entry() {
             "myapp.zip",
             "v1.0.0",
             dest.to_str().unwrap().to_string(),
+            if cfg!(windows) { "myapp.exe" } else { "myapp" },
         );
         state.save();
 
@@ -487,8 +604,9 @@ fn test_info_subcommand_displays_cached_entry() {
         assert_eq!(entry.tag, "v1.0.0");
         assert_eq!(entry.asset, "myapp.zip");
         assert_eq!(&entry.destination, dest.to_str().unwrap());
+        // info resolves the binary through the recorded filename, not the repo basename
+        assert_eq!(entry.installed_filename(&repo), installed_name);
 
-        let binary = dest.join("myapp.exe");
-        assert!(binary.exists());
+        assert!(binary_path.exists());
     });
 }

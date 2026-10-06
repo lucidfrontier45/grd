@@ -87,3 +87,16 @@ A format-based tie-break applied **after** the primary OS/arch/musl score: among
 | Unchanged | `.tar.gz` vs `.tar.xz` (no zip) still yields `Multiple` |
 | Opt-out | `--exclude zip` |
 
+## Binary Name
+The filename of an installed executable. It resolves independently of **which** archive entry gets extracted, in this precedence order:
+
+| Aspect | Behavior |
+|--------|----------|
+| `--rename` | Output filename only — does not change which archive entry is extracted |
+| `--bin-name` | Selects the archive entry, and names the output when `--rename` is absent |
+| Default | Repository basename (`grd owner/fd` → `fd`) |
+| Windows | A trailing `.exe` is stripped then re-appended, so `--rename fd.exe` and `--rename fd` agree |
+| `--no-decompress` | No extraction happens; the output is the asset name unless `--rename` is given |
+| Containment | `--rename` rejects empty values and any `/`, `\`, or `..` — `dest.join(name)` would otherwise escape the destination |
+| Recorded as | `binary` in `state.toml`, so `remove` / `info` locate custom-named installs |
+

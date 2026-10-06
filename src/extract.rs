@@ -11,39 +11,44 @@ use zip::ZipArchive;
 
 use crate::download::DownloadSource;
 
+/// Extract a downloaded asset and write it to `dest_dir`.
+///
+/// `lookup_name` selects which archive entry is extracted; `out_name` is the
+/// filename written to disk. They differ when the user asked for a rename, and
+/// `out_name` arrives already `.exe`-normalized for the target platform.
 pub fn extract_and_save(
     source: DownloadSource,
     filename: &str,
-    bin_name: &str,
+    lookup_name: &str,
+    out_name: &str,
     dest_dir: &Path,
     no_decompress: bool,
 ) -> Result<()> {
     fs::create_dir_all(dest_dir).context("Failed to create destination directory")?;
 
     if no_decompress {
-        save_raw(source, filename, dest_dir)?;
-        println!("Saved raw asset to {:?}", dest_dir.join(filename));
+        save_raw(source, out_name, dest_dir)?;
+        println!("Saved raw asset to {:?}", dest_dir.join(out_name));
         return Ok(());
     }
 
-    let target_bin_name = if cfg!(windows) {
-        format!("{}.exe", bin_name)
-    } else {
-        bin_name.to_string()
-    };
-
     if filename.ends_with(".zip") {
-        extract_zip(source, &target_bin_name, dest_dir)
+        extract_zip(source, lookup_name, out_name, dest_dir)
     } else if filename.ends_with(".tar.xz") {
-        extract_tar_xz(source, &target_bin_name, dest_dir)
+        extract_tar_xz(source, lookup_name, out_name, dest_dir)
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_tar_gz(source, &target_bin_name, dest_dir)
+        extract_tar_gz(source, lookup_name, out_name, dest_dir)
     } else {
-        save_raw(source, &target_bin_name, dest_dir)
+        save_raw(source, out_name, dest_dir)
     }
 }
 
-fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn extract_zip(
+    source: DownloadSource,
+    lookup_name: &str,
+    out_name: &str,
+    dest_dir: &Path,
+) -> Result<()> {
     let rdr: Box<dyn ReadSeek> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -51,8 +56,8 @@ fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -
     let mut archive = ZipArchive::new(rdr).context("Failed to parse ZIP archive")?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).context("Failed to read ZIP entry")?;
-        if file.name().ends_with(target_bin_name) {
-            let out_path = dest_dir.join(target_bin_name);
+        if file.name().ends_with(lookup_name) {
+            let out_path = dest_dir.join(out_name);
             let mut outfile = File::create(&out_path).context("Failed to create output file")?;
             io::copy(&mut file, &mut outfile).context("Failed to write extracted file")?;
             #[cfg(unix)]
@@ -60,10 +65,15 @@ fn extract_zip(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -
             return Ok(());
         }
     }
-    bail!("Executable '{}' not found in archive", target_bin_name)
+    bail!("Executable '{}' not found in archive", lookup_name)
 }
 
-fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn extract_tar_gz(
+    source: DownloadSource,
+    lookup_name: &str,
+    out_name: &str,
+    dest_dir: &Path,
+) -> Result<()> {
     let rdr: Box<dyn Read> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -72,8 +82,8 @@ fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
-        if path.to_string_lossy().ends_with(target_bin_name) {
-            let out_path = dest_dir.join(target_bin_name);
+        if path.to_string_lossy().ends_with(lookup_name) {
+            let out_path = dest_dir.join(out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
             #[cfg(unix)]
@@ -81,10 +91,15 @@ fn extract_tar_gz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
             return Ok(());
         }
     }
-    bail!("Executable '{}' not found in archive", target_bin_name)
+    bail!("Executable '{}' not found in archive", lookup_name)
 }
 
-fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+fn extract_tar_xz(
+    source: DownloadSource,
+    lookup_name: &str,
+    out_name: &str,
+    dest_dir: &Path,
+) -> Result<()> {
     // Stream-decompress xz into a temp file rather than buffering the entire
     // decompressed archive in memory, so the user's --memory-limit setting is
     // respected for .tar.xz payloads.
@@ -108,8 +123,8 @@ fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
-        if path.to_string_lossy().ends_with(target_bin_name) {
-            let out_path = dest_dir.join(target_bin_name);
+        if path.to_string_lossy().ends_with(lookup_name) {
+            let out_path = dest_dir.join(out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
             #[cfg(unix)]
@@ -117,7 +132,7 @@ fn extract_tar_xz(source: DownloadSource, target_bin_name: &str, dest_dir: &Path
             return Ok(());
         }
     }
-    bail!("Executable '{}' not found in archive", target_bin_name)
+    bail!("Executable '{}' not found in archive", lookup_name)
 }
 
 fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
@@ -224,7 +239,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", "my-app", dest);
         assert!(
             result.is_ok(),
             "extract_tar_xz failed: {:?}",
@@ -262,7 +277,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", "my-app", dest);
         assert!(result.is_err());
     }
 
@@ -275,7 +290,7 @@ mod tests {
         let corrupted_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00];
         let source = DownloadSource::Memory(corrupted_data);
 
-        let result = extract_tar_xz(source, "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", "my-app", dest);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -293,7 +308,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3]);
 
-        let result = extract_and_save(source, "foo.tar.xz", "app", dest, true);
+        let result = extract_and_save(source, "foo.tar.xz", "app", "foo.tar.xz", dest, true);
         assert!(result.is_ok());
 
         let file_path = dest.join("foo.tar.xz");
@@ -308,7 +323,7 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
 
-        let result = extract_and_save(source, "test.bin", "app", dest_dir, true);
+        let result = extract_and_save(source, "test.bin", "app", "test.bin", dest_dir, true);
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("test.bin");
@@ -323,7 +338,8 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
 
-        let result = extract_and_save(source, "test.bin", "app", dest_dir, false);
+        // out_name arrives already .exe-normalized from main.rs
+        let result = extract_and_save(source, "test.bin", "app", "app.exe", dest_dir, false);
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("app.exe");
@@ -339,7 +355,7 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
 
-        let result = extract_and_save(source, "test.bin", "app", dest_dir, false);
+        let result = extract_and_save(source, "test.bin", "app", "app", dest_dir, false);
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("app");
@@ -364,5 +380,93 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(perms.mode() & 0o777, 0o755);
         }
+    }
+
+    /// Build a single-entry `.tar.gz` holding `entry_name` with `content`.
+    fn tar_gz_with(entry_name: &str, content: &[u8]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_path(entry_name).unwrap();
+            header.set_size(content.len() as u64);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, content).unwrap();
+            builder.finish().unwrap();
+        }
+
+        let mut compressed = Vec::new();
+        flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default())
+            .write_all(&tar_bytes)
+            .expect("gzip compression should succeed");
+        compressed
+    }
+
+    #[test]
+    fn test_extract_and_save_tar_gz_renames_output() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        // Archive holds "my-app"; we look it up by that name but write "renamed".
+        let source = DownloadSource::Memory(tar_gz_with("my-app", b"hello"));
+
+        let result = extract_and_save(source, "app.tar.gz", "my-app", "renamed", dest, false);
+        assert!(
+            result.is_ok(),
+            "extract_and_save failed: {:?}",
+            result.as_ref().err()
+        );
+
+        let renamed = dest.join("renamed");
+        assert!(
+            renamed.exists(),
+            "output should land under the rename value"
+        );
+        assert_eq!(fs::read(&renamed).unwrap(), b"hello");
+        assert!(
+            !dest.join("my-app").exists(),
+            "the lookup name must not also be written to disk"
+        );
+    }
+
+    #[test]
+    fn test_extract_and_save_tar_gz_rename_missing_lookup_is_error() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let source = DownloadSource::Memory(tar_gz_with("my-app", b"hello"));
+
+        // --rename must not be used as a fallback lookup key.
+        let result = extract_and_save(source, "app.tar.gz", "other", "renamed", dest, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("other"),
+            "error should name the lookup name that was tried: {err}"
+        );
+        assert!(!dest.join("renamed").exists());
+    }
+
+    #[test]
+    fn test_extract_and_save_no_decompress_uses_rename_value() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest_dir = temp_dir.path();
+        let source = DownloadSource::Memory(b"payload".to_vec());
+
+        let result = extract_and_save(source, "asset.tar.gz", "app", "renamed", dest_dir, true);
+        assert!(result.is_ok());
+
+        assert!(dest_dir.join("renamed").exists());
+        assert!(
+            !dest_dir.join("asset.tar.gz").exists(),
+            "the asset filename must be replaced by the rename value"
+        );
+        assert_eq!(fs::read(dest_dir.join("renamed")).unwrap(), b"payload");
     }
 }
