@@ -239,6 +239,26 @@ grd owner/repo --select
 scoring, so it always wins over the preference. Matching is substring-based, so
 `--exclude musl` also drops `musleabi`-named assets.
 
+## Format Preference
+
+When a release ships several assets that are tied on the primary OS/arch/musl
+score, `grd` prefers the `.zip` archive. This applies on every OS and only breaks
+genuine ties: an asset with a better platform match still wins. In particular, a
+precisely-named `.tar.gz` (e.g. `app-x86_64-linux.tar.gz`) beats a vague `.zip`
+(e.g. `app-linux.zip`), and a Linux musl `.tar.gz` still beats a glibc `.zip`
+(see [libc Preference](#libc-preference)).
+
+The preference ranks `.zip` above `.tar.gz`, `.tgz`, `.tar.xz`, and `.exe`. When
+a tie contains no `.zip` — or more than one — the candidates remain tied and `grd`
+still prints the matching list instead of guessing.
+
+**Opt-out with `--exclude zip`**: exclusion is applied before scoring, so it
+always wins over the preference and forces a tar/`.exe` asset:
+
+```bash
+grd owner/repo --exclude zip
+```
+
 ## Version Cache
 
 To avoid redundant downloads, `grd` caches the last-downloaded release version per

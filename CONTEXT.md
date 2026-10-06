@@ -76,3 +76,14 @@ A default allowlist applied to asset names **before** OS/arch scoring, so non-bi
 | Filter scope | Selection only — extraction pipeline still only knows the 5 allowlisted formats |
 | Opt-out | `--no-ext-filter` (disables the filter; previous behavior restored) |
 
+## Format Preference
+A format-based tie-break applied **after** the primary OS/arch/musl score: among assets sharing the top score, a lone `.zip` is selected. It ranks `.zip` above `.tar.gz`, `.tgz`, `.tar.xz`, and `.exe`, on every OS.
+
+| Aspect | Behavior |
+|--------|----------|
+| Scope | Tie-break only — never outranks a better OS/arch/musl score |
+| Preferred | `.zip` over `.tar.gz` / `.tgz` / `.tar.xz` / `.exe` |
+| Interaction | musl `.tar.gz` still beats glibc `.zip`; precise `.tar.gz` still beats vague `.zip` |
+| Unchanged | `.tar.gz` vs `.tar.xz` (no zip) still yields `Multiple` |
+| Opt-out | `--exclude zip` |
+

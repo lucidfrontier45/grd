@@ -142,6 +142,13 @@ fn has_musl_token(name: &str) -> bool {
     name.contains("musl")
 }
 
+/// True when `name` carries a `.zip` extension (case-insensitive). Used only as
+/// a tie-break among assets that already share the top primary score, so a
+/// `.zip` never outranks a better OS/arch/musl match.
+fn is_zip(name: &str) -> bool {
+    matches!(extract_extension(name).as_deref(), Some(".zip"))
+}
+
 /// True when `name` mentions the glibc libc (`gnu`, `gnueabi`, `gnueabihf`).
 /// Same substring rationale as [`has_musl_token`]. Test-only: the scoring rules
 /// never demote glibc assets, so this exists to document the other half of the
@@ -287,7 +294,9 @@ fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
     assets.sort_by(|a, b| {
         let score_a = calculate_match_score(&a.name, target_os, target_arch);
         let score_b = calculate_match_score(&b.name, target_os, target_arch);
-        score_b.cmp(&score_a)
+        score_b
+            .cmp(&score_a)
+            .then_with(|| is_zip(&b.name).cmp(&is_zip(&a.name)))
     });
 }
 
@@ -318,7 +327,25 @@ fn best_unique_match<'a>(
     }
 
     if best_count == 1 {
-        best.map(|(asset, _)| asset)
+        return best.map(|(asset, _)| asset);
+    }
+
+    // Tie among top scorers: a lone `.zip` in that tied set wins. This is a
+    // secondary key only — it runs after the primary OS/arch/musl score, so a
+    // precisely-matched `.tar.gz` still beats a vague `.zip`, and a musl
+    // `.tar.gz` (primary 4) still beats a glibc `.zip` (primary 3). No zip, or
+    // more than one, leaves the set genuinely ambiguous → `None`.
+    let best_score = best.map(|(_, score)| score)?;
+    let mut zips = assets
+        .iter()
+        .filter(|asset| {
+            calculate_match_score(&asset.name, target_os, target_arch) == best_score
+                && is_zip(&asset.name)
+        })
+        .copied();
+    let candidate = zips.next()?;
+    if zips.next().is_none() {
+        Some(candidate)
     } else {
         None
     }
@@ -1016,6 +1043,8 @@ mod tests {
 
     #[test]
     fn test_select_asset_multiple_matches_without_force_select() {
+        // Same primary score (3): linux exact +2, x86_64 +1. The `.zip` wins as
+        // the format tie-break, so this is no longer an ambiguous match.
         let assets = vec![
             Asset {
                 name: "app-x86_64-linux.tar.gz".to_string(),
@@ -1029,8 +1058,186 @@ mod tests {
             },
         ];
 
+        match find_asset(&assets, "linux", "x86_64", None, false) {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux.zip"),
+            other => panic!("expected the zip asset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_is_zip_helper() {
+        assert!(is_zip("app-x86_64-linux.zip"));
+        assert!(is_zip("APP-X86_64-LINUX.ZIP"));
+        assert!(is_zip("dist/app-1.2.3.zip"));
+        assert!(!is_zip("app-x86_64-linux.tar.gz"));
+        assert!(!is_zip("app-x86_64-linux.tgz"));
+        assert!(!is_zip("app-x86_64-linux.tar.xz"));
+        assert!(!is_zip("app-x86_64-linux.exe"));
+        assert!(!is_zip("app-x86_64-linux.tar.gz.sha256"));
+    }
+
+    #[test]
+    fn test_select_asset_prefers_zip_over_non_zip_formats_on_linux() {
+        for loser in [
+            "app-x86_64-linux.tar.gz",
+            "app-x86_64-linux.tgz",
+            "app-x86_64-linux.tar.xz",
+            "app-x86_64-linux.exe",
+        ] {
+            let assets = vec![
+                Asset {
+                    name: loser.to_string(),
+                    browser_download_url: format!("https://example.com/{loser}"),
+                    size: 1024,
+                },
+                Asset {
+                    name: "app-x86_64-linux.zip".to_string(),
+                    browser_download_url: "https://example.com/app.zip".to_string(),
+                    size: 2048,
+                },
+            ];
+
+            match find_asset(&assets, "linux", "x86_64", None, false) {
+                Selection::Exact(asset) => assert_eq!(
+                    asset.name, "app-x86_64-linux.zip",
+                    "{loser} should lose to the zip"
+                ),
+                other => panic!("{loser}: expected the zip asset, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_select_asset_prefers_zip_over_exe_on_windows() {
+        let assets = vec![
+            Asset {
+                name: "app-windows-x86_64.exe".to_string(),
+                browser_download_url: "https://example.com/app.exe".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-windows-x86_64.zip".to_string(),
+                browser_download_url: "https://example.com/app.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        match find_asset(&assets, "windows", "x86_64", None, false) {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-windows-x86_64.zip"),
+            other => panic!("expected the zip asset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_musl_targz_beats_glibc_zip() {
+        // Primary score decides: musl tar.gz = 4 (2 os + 1 arch + 1 musl),
+        // glibc zip = 3. The format tie-break must not promote the zip.
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux-gnu.zip".to_string(),
+                browser_download_url: "https://example.com/app-gnu.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux-musl.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app-musl.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        match find_asset(&assets, "linux", "x86_64", None, false) {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux-musl.tar.gz"),
+            other => panic!("expected the musl tar.gz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_precise_targz_beats_vague_zip() {
+        // Precise tar.gz = 3 (2 os + 1 arch); vague zip = 2 (os only, default
+        // arch). The richer primary score wins despite the zip preference.
+        let assets = vec![
+            Asset {
+                name: "app-linux.zip".to_string(),
+                browser_download_url: "https://example.com/app.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 2048,
+            },
+        ];
+
+        match find_asset(&assets, "linux", "x86_64", None, false) {
+            Selection::Exact(asset) => assert_eq!(asset.name, "app-x86_64-linux.tar.gz"),
+            other => panic!("expected the precise tar.gz, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_select_asset_non_zip_tie_stays_multiple() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux.tar.xz".to_string(),
+                browser_download_url: "https://example.com/app.tar.xz".to_string(),
+                size: 2048,
+            },
+        ];
+
         let result = find_asset(&assets, "linux", "x86_64", None, false);
-        assert!(matches!(result, Selection::Multiple(_)));
+        assert!(
+            matches!(result, Selection::Multiple(_)),
+            "without a zip the tie must stay ambiguous, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_select_asset_two_zips_stay_multiple() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux.zip".to_string(),
+                browser_download_url: "https://example.com/app1.zip".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-amd64-linux.zip".to_string(),
+                browser_download_url: "https://example.com/app2.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let result = find_asset(&assets, "linux", "x86_64", None, false);
+        assert!(
+            matches!(result, Selection::Multiple(_)),
+            "more than one zip is still ambiguous, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_sort_by_score_places_zip_first_on_tie() {
+        let assets = vec![
+            Asset {
+                name: "app-x86_64-linux.tar.gz".to_string(),
+                browser_download_url: "https://example.com/app.tar.gz".to_string(),
+                size: 1024,
+            },
+            Asset {
+                name: "app-x86_64-linux.zip".to_string(),
+                browser_download_url: "https://example.com/app.zip".to_string(),
+                size: 2048,
+            },
+        ];
+
+        let mut asset_refs: Vec<&Asset> = assets.iter().collect();
+        sort_by_score(&mut asset_refs, "linux", "x86_64");
+
+        assert_eq!(asset_refs[0].name, "app-x86_64-linux.zip");
+        assert_eq!(asset_refs[1].name, "app-x86_64-linux.tar.gz");
     }
 
     #[test]
