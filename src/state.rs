@@ -7,6 +7,28 @@ pub struct CachedRelease {
     pub tag: String,
     pub asset: String,
     pub destination: String,
+    /// Final on-disk filename, platform-specific (e.g. `fd.exe` on Windows).
+    /// Absent in state files written before `--rename` existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+impl CachedRelease {
+    /// Filename this release was installed as.
+    ///
+    /// Falls back to the repo basename for entries recorded before
+    /// `binary` was stored, so older state files keep working.
+    pub fn installed_filename(&self, repo: &str) -> String {
+        if let Some(binary) = &self.binary {
+            return binary.clone();
+        }
+        let bin_name = repo.split('/').next_back().unwrap_or("app");
+        if cfg!(windows) {
+            format!("{}.exe", bin_name)
+        } else {
+            bin_name.to_string()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -138,13 +160,21 @@ impl State {
         self.default_install_dir = Some(path.to_string());
     }
 
-    pub fn set_cached(&mut self, repo: &str, asset_name: &str, tag: &str, destination: String) {
+    pub fn set_cached(
+        &mut self,
+        repo: &str,
+        asset_name: &str,
+        tag: &str,
+        destination: String,
+        binary: &str,
+    ) {
         self.versions.insert(
             repo.to_string(),
             CachedRelease {
                 tag: tag.to_string(),
                 asset: asset_name.to_string(),
                 destination,
+                binary: Some(binary.to_string()),
             },
         );
     }
@@ -211,7 +241,13 @@ mod tests {
     #[test]
     fn test_set_and_get_cached() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", String::new());
+        state.set_cached(
+            "owner/repo",
+            "foo-linux.tar.gz",
+            "v1.0.0",
+            String::new(),
+            "",
+        );
         let cached = state.get_cached("owner/repo").unwrap();
         assert_eq!(cached.tag, "v1.0.0");
         assert_eq!(cached.asset, "foo-linux.tar.gz");
@@ -226,8 +262,8 @@ mod tests {
     #[test]
     fn test_set_overwrites_previous() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
-        state.set_cached("owner/repo", "bar.tar.gz", "v2.0.0", String::new());
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
+        state.set_cached("owner/repo", "bar.tar.gz", "v2.0.0", String::new(), "");
         let cached = state.get_cached("owner/repo").unwrap();
         assert_eq!(cached.tag, "v2.0.0");
         assert_eq!(cached.asset, "bar.tar.gz");
@@ -236,8 +272,8 @@ mod tests {
     #[test]
     fn test_diff_repos_independent() {
         let mut state = State::default();
-        state.set_cached("a/x", "asset-a.tar.gz", "v1", String::new());
-        state.set_cached("b/y", "asset-b.tar.gz", "v2", String::new());
+        state.set_cached("a/x", "asset-a.tar.gz", "v1", String::new(), "");
+        state.set_cached("b/y", "asset-b.tar.gz", "v2", String::new(), "");
         let a = state.get_cached("a/x").unwrap();
         assert_eq!(a.tag, "v1");
         assert_eq!(a.asset, "asset-a.tar.gz");
@@ -249,8 +285,20 @@ mod tests {
     #[test]
     fn test_same_repo_only_one_entry() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", String::new());
-        state.set_cached("owner/repo", "foo-macos.tar.gz", "v1.0.0", String::new());
+        state.set_cached(
+            "owner/repo",
+            "foo-linux.tar.gz",
+            "v1.0.0",
+            String::new(),
+            "",
+        );
+        state.set_cached(
+            "owner/repo",
+            "foo-macos.tar.gz",
+            "v1.0.0",
+            String::new(),
+            "",
+        );
         // Second overwrites first — only one entry per repo
         assert_eq!(state.versions.len(), 1);
         let cached = state.get_cached("owner/repo").unwrap();
@@ -264,8 +312,14 @@ mod tests {
         let _env = StatePathEnvGuard::set(&state_path);
 
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo-linux.tar.gz", "v1.0.0", String::new());
-        state.set_cached("other/repo", "bar-macos.zip", "v2.3.1", String::new());
+        state.set_cached(
+            "owner/repo",
+            "foo-linux.tar.gz",
+            "v1.0.0",
+            String::new(),
+            "",
+        );
+        state.set_cached("other/repo", "bar-macos.zip", "v2.3.1", String::new(), "");
         state.save();
 
         let loaded = State::load();
@@ -292,7 +346,7 @@ mod tests {
     #[test]
     fn test_remove_cached_returns_entry() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
         let removed = state.remove_cached("owner/repo").unwrap();
         assert_eq!(removed.tag, "v1.0.0");
         assert_eq!(removed.asset, "foo.tar.gz");
@@ -308,7 +362,7 @@ mod tests {
     #[test]
     fn test_remove_cached_idempotent() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
         assert!(state.remove_cached("owner/repo").is_some());
         assert!(state.remove_cached("owner/repo").is_none());
     }
@@ -327,6 +381,92 @@ asset = "foo.tar.gz"
 "#;
         let result: Result<CachedRelease, _> = toml::from_str(without_dest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cached_release_binary_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_cached(
+            "sharkdp/fd",
+            "fd-v10.4.2-x86_64-unknown-linux-gnu.tar.gz",
+            "v10.4.2",
+            "/usr/local/bin".to_string(),
+            "fd2",
+        );
+        state.save();
+
+        let loaded = State::load();
+        let entry = loaded.get_cached("sharkdp/fd").unwrap();
+        assert_eq!(entry.binary.as_deref(), Some("fd2"));
+        assert_eq!(entry.installed_filename("sharkdp/fd"), "fd2");
+    }
+
+    #[test]
+    fn test_cached_release_without_binary_falls_back_to_repo_basename() {
+        // State written before `--rename` existed has no `binary` key.
+        let legacy = r#"tag = "v1.0.0"
+asset = "foo.tar.gz"
+destination = "/usr/local/bin"
+"#;
+        let parsed: CachedRelease = toml::from_str(legacy).unwrap();
+        assert!(parsed.binary.is_none());
+
+        let expected = if cfg!(windows) {
+            "repo.exe".to_string()
+        } else {
+            "repo".to_string()
+        };
+        assert_eq!(parsed.installed_filename("owner/repo"), expected);
+    }
+
+    #[test]
+    fn test_installed_filename_prefers_stored_value() {
+        let entry = CachedRelease {
+            tag: "v1.0.0".to_string(),
+            asset: "foo.tar.gz".to_string(),
+            destination: "/usr/local/bin".to_string(),
+            binary: Some("renamed".to_string()),
+        };
+        assert_eq!(entry.installed_filename("owner/repo"), "renamed");
+    }
+
+    #[test]
+    fn test_installed_filename_fallback_uses_last_repo_segment() {
+        let entry = CachedRelease {
+            tag: "v1.0.0".to_string(),
+            asset: "foo.tar.gz".to_string(),
+            destination: String::new(),
+            binary: None,
+        };
+        let expected = if cfg!(windows) {
+            "tool.exe".to_string()
+        } else {
+            "tool".to_string()
+        };
+        assert_eq!(entry.installed_filename("owner/tool"), expected);
+        assert_eq!(entry.installed_filename("tool"), expected);
+    }
+
+    #[test]
+    fn test_binary_serialized_only_when_set() {
+        let mut state = State::default();
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(content.contains("binary"));
+
+        // A None binary is omitted entirely, keeping the file backward compatible.
+        let without = CachedRelease {
+            tag: "v1".to_string(),
+            asset: "a.tar.gz".to_string(),
+            destination: String::new(),
+            binary: None,
+        };
+        let content = toml::to_string_pretty(&without).unwrap();
+        assert!(!content.contains("binary"));
     }
 
     #[test]
@@ -379,7 +519,7 @@ asset = "foo.tar.gz"
     #[test]
     fn test_toml_format() {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new());
+        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
         let content = toml::to_string_pretty(&state).unwrap();
         // serializes as nested table, e.g. ["versions"."owner/repo"]
         assert!(content.contains("versions"));

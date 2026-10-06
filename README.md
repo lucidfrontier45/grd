@@ -278,6 +278,7 @@ repository in `~/.grd/state.toml`:
   "owner/repo" = { tag = "v1.0.0", asset = "app-linux-x86_64.tar.gz", destination = "/usr/local/bin" }
   ```
   - `destination` is mandatory and records where the binary was installed.
+  - `binary` records the installed filename (e.g. `fd.exe` on Windows). Entries written before `--rename` existed omit it; `grd remove` and `grd info` then fall back to the repo basename.
   - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
 
 ## Options
@@ -288,7 +289,8 @@ repository in `~/.grd/state.toml`:
 - `list-platform`: Display supported OS/architecture combinations
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
-- `--bin-name`: Override executable name
+- `--bin-name`: Select which executable to extract from the archive (default: repo basename). It also names the installed file unless `--rename` is given.
+- `--rename`: Install the extracted executable under a different filename. Does not change which file is picked from the archive, so `grd owner/prj --bin-name exe1 --rename exe2` extracts `exe1` and writes `exe2`. Also applies with `--no-decompress`.
 - `--select`: Force manual selection from filtered (OS/arch-matched) candidates
 - `--select-all`: Force manual selection from all available assets (ignores OS/arch filter)
 - `--exclude`: Comma-separated words to exclude from asset matching
