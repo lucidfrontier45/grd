@@ -11,6 +11,20 @@ use zip::ZipArchive;
 
 use crate::download::DownloadSource;
 
+/// True when `entry_path` refers to `lookup_name`.
+///
+/// The suffix must start on a path-component boundary (start of path or right
+/// after `/` / `\\`), so nested lookups like `pkg/bin/app` still match
+/// `dist/pkg/bin/app`, while collisions such as `LICENSE.pi` never match
+/// `pi` (nor does `xpi`).
+fn is_lookup_match(entry_path: &str, lookup_name: &str) -> bool {
+    if !entry_path.ends_with(lookup_name) {
+        return false;
+    }
+    let boundary = entry_path.len() - lookup_name.len();
+    boundary == 0 || entry_path[..boundary].ends_with(['/', '\\'])
+}
+
 /// Extract a downloaded asset and write it to `dest_dir`.
 ///
 /// `lookup_name` selects which archive entry is extracted; `out_name` is the
@@ -56,7 +70,10 @@ fn extract_zip(
     let mut archive = ZipArchive::new(rdr).context("Failed to parse ZIP archive")?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).context("Failed to read ZIP entry")?;
-        if file.name().ends_with(lookup_name) {
+        if file.is_dir() {
+            continue;
+        }
+        if is_lookup_match(file.name(), lookup_name) {
             let out_path = dest_dir.join(out_name);
             let mut outfile = File::create(&out_path).context("Failed to create output file")?;
             io::copy(&mut file, &mut outfile).context("Failed to write extracted file")?;
@@ -82,7 +99,10 @@ fn extract_tar_gz(
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
-        if path.to_string_lossy().ends_with(lookup_name) {
+        if file.header().entry_type().is_dir() {
+            continue;
+        }
+        if is_lookup_match(&path.to_string_lossy(), lookup_name) {
             let out_path = dest_dir.join(out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
@@ -123,7 +143,10 @@ fn extract_tar_xz(
     for entry in archive.entries().context("Failed to read tar archive")? {
         let mut file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
-        if path.to_string_lossy().ends_with(lookup_name) {
+        if file.header().entry_type().is_dir() {
+            continue;
+        }
+        if is_lookup_match(&path.to_string_lossy(), lookup_name) {
             let out_path = dest_dir.join(out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
@@ -404,6 +427,156 @@ mod tests {
         compressed
     }
 
+    /// Raw (uncompressed) tar bytes for [`tar_gz_with_entries`] / [`tar_xz_with_entries`].
+    fn tar_bytes_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            for (name, content) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_path(name).unwrap();
+                header.set_mode(0o755);
+                if name.ends_with('/') {
+                    header.set_entry_type(tar::EntryType::Directory);
+                    header.set_size(0);
+                } else {
+                    header.set_entry_type(tar::EntryType::Regular);
+                    header.set_size(content.len() as u64);
+                }
+                header.set_cksum();
+                builder.append(&header, *content).unwrap();
+            }
+            builder.finish().unwrap();
+        }
+        tar_bytes
+    }
+
+    /// Build a multi-entry `.tar.gz`; names ending in `/` become directories.
+    fn tar_gz_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let tar_bytes = tar_bytes_with_entries(entries);
+        let mut compressed = Vec::new();
+        flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default())
+            .write_all(&tar_bytes)
+            .expect("gzip compression should succeed");
+        compressed
+    }
+
+    /// Build a multi-entry `.tar.xz`; names ending in `/` become directories.
+    fn tar_xz_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let tar_bytes = tar_bytes_with_entries(entries);
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut io::Cursor::new(&tar_bytes), &mut compressed)
+            .expect("xz compression should succeed");
+        compressed
+    }
+
+    /// Build a multi-entry `.zip`; names ending in `/` become directories.
+    fn zip_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buf);
+            for (name, content) in entries {
+                if name.ends_with('/') {
+                    writer
+                        .add_directory(*name, SimpleFileOptions::default())
+                        .unwrap();
+                } else {
+                    writer
+                        .start_file(*name, SimpleFileOptions::default())
+                        .unwrap();
+                    writer.write_all(content).unwrap();
+                }
+            }
+            writer.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn test_is_lookup_match_component_boundary() {
+        // Exact and component-boundary matches.
+        assert!(is_lookup_match("pi", "pi"));
+        assert!(is_lookup_match("./pi", "pi"));
+        assert!(is_lookup_match("pi-bolt-linux-x64/pi", "pi"));
+        // Nested lookups still match under a different top-level directory.
+        assert!(is_lookup_match("dist/pkg/bin/app", "pkg/bin/app"));
+        // Suffix collisions on the same component must never match.
+        assert!(!is_lookup_match("pi-bolt-linux-x64/LICENSE.pi", "pi"));
+        assert!(!is_lookup_match("api", "pi"));
+        assert!(!is_lookup_match("xpi", "pi"));
+        assert!(!is_lookup_match("i", "pi"));
+    }
+
+    #[test]
+    fn test_extract_tar_gz_skips_name_suffix_collision() {
+        use tempfile::TempDir;
+
+        // Regression: opensec-git/Pi-Bolt ships `pi-bolt-linux-x64/LICENSE.pi`
+        // *before* `pi-bolt-linux-x64/pi`; a raw `ends_with("pi")` matched the
+        // license file and installed it as the binary.
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[
+            ("pi-bolt-linux-x64/", b""),
+            ("pi-bolt-linux-x64/LICENSE.pi", b"MIT License"),
+            ("pi-bolt-linux-x64/pi", b"#!/bin/sh\necho pi\n"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(source, "pi-bolt.tar.gz", "pi", "pi-bolt", dest, false);
+        assert!(
+            result.is_ok(),
+            "extract_and_save failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(
+            fs::read(dest.join("pi-bolt")).unwrap(),
+            b"#!/bin/sh\necho pi\n"
+        );
+    }
+
+    #[test]
+    fn test_extract_tar_xz_skips_name_suffix_collision() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_xz_with_entries(&[
+            ("pi-bolt-linux-x64/", b""),
+            ("pi-bolt-linux-x64/LICENSE.pi", b"MIT License"),
+            ("pi-bolt-linux-x64/pi", b"binary-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(source, "pi-bolt.tar.xz", "pi", "pi-bolt", dest, false);
+        assert!(
+            result.is_ok(),
+            "extract_and_save failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(fs::read(dest.join("pi-bolt")).unwrap(), b"binary-bytes");
+    }
+
+    #[test]
+    fn test_extract_zip_skips_name_suffix_collision() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("app-0.1/", b""),
+            ("app-0.1/LICENSE.pi", b"MIT License"),
+            ("app-0.1/pi", b"binary-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(source, "app.zip", "pi", "pi-bolt", dest, false);
+        assert!(
+            result.is_ok(),
+            "extract_and_save failed: {:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(fs::read(dest.join("pi-bolt")).unwrap(), b"binary-bytes");
+    }
     #[test]
     fn test_extract_and_save_tar_gz_renames_output() {
         use tempfile::TempDir;
