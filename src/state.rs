@@ -33,7 +33,7 @@ impl CachedRelease {
 
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct State {
-    #[serde(rename = "versions")]
+    #[serde(rename = "versions", default)]
     pub versions: HashMap<String, CachedRelease>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -341,6 +341,19 @@ mod tests {
 
         let loaded = State::load();
         assert!(loaded.versions.is_empty());
+    }
+
+    #[test]
+    fn test_load_missing_versions_falls_back_to_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        fs::write(&state_path, "default_install_dir = \"/opt/bin\"\n").unwrap();
+
+        let loaded = State::load();
+        assert!(loaded.versions.is_empty());
+        assert_eq!(loaded.default_install_dir.as_deref(), Some("/opt/bin"));
     }
 
     #[test]
