@@ -9,7 +9,10 @@ use flate2::read::GzDecoder;
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
-use crate::download::DownloadSource;
+use crate::{
+    download::DownloadSource,
+    naming::{is_windows, rename_output, strip_exe_suffix},
+};
 
 /// True when `entry_path` refers to `lookup_name`.
 ///
@@ -25,44 +28,76 @@ fn is_lookup_match(entry_path: &str, lookup_name: &str) -> bool {
     boundary == 0 || entry_path[..boundary].ends_with(['/', '\\'])
 }
 
-/// Extract a downloaded asset and write it to `dest_dir`.
+/// True when `entry_path` selects `lookup_name` for extraction.
 ///
-/// `lookup_name` selects which archive entry is extracted; `out_name` is the
-/// filename written to disk. They differ when the user asked for a rename, and
-/// `out_name` arrives already `.exe`-normalized for the target platform.
+/// On a Windows target the release archive carries the executable's `.exe`
+/// suffix while the default lookup name (repository basename) does not, so the
+/// suffix is ignored there. Elsewhere only the exact component-boundary suffix
+/// matches.
+fn is_entry_match(entry_path: &str, lookup_name: &str, os: &str) -> bool {
+    if is_lookup_match(entry_path, lookup_name) {
+        return true;
+    }
+    is_windows(os) && is_lookup_match(strip_exe_suffix(entry_path), strip_exe_suffix(lookup_name))
+}
+
+/// Filename an extracted entry is written under: an explicit `--rename` wins,
+/// otherwise the entry keeps its own filename.
+fn entry_out_name(entry_path: &str, rename: Option<&str>, os: &str) -> String {
+    if let Some(rename) = rename {
+        return rename_output(rename, os);
+    }
+    Path::new(entry_path).file_name().map_or_else(
+        || entry_path.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Extract a downloaded asset into `dest_dir` and return the written filename.
+///
+/// `lookup_name` selects which archive entry is extracted. `rename`, when set,
+/// overrides the name written to disk (`--rename`); otherwise the matched
+/// entry's own filename is kept. `os` is the selected target platform and only
+/// drives the Windows `.exe` lookup candidate and the `--rename` suffix.
 pub fn extract_and_save(
     source: DownloadSource,
     filename: &str,
     lookup_name: &str,
-    out_name: &str,
+    rename: Option<&str>,
     dest_dir: &Path,
     no_decompress: bool,
-) -> Result<()> {
+    os: &str,
+) -> Result<String> {
     fs::create_dir_all(dest_dir).context("Failed to create destination directory")?;
 
     if no_decompress {
-        save_raw(source, out_name, dest_dir)?;
-        println!("Saved raw asset to {:?}", dest_dir.join(out_name));
-        return Ok(());
+        let out_name = rename.map_or_else(|| filename.to_string(), |r| rename_output(r, os));
+        save_raw(source, &out_name, dest_dir)?;
+        println!("Saved raw asset to {:?}", dest_dir.join(&out_name));
+        return Ok(out_name);
     }
 
     if filename.ends_with(".zip") {
-        extract_zip(source, lookup_name, out_name, dest_dir)
+        extract_zip(source, lookup_name, rename, dest_dir, os)
     } else if filename.ends_with(".tar.xz") {
-        extract_tar_xz(source, lookup_name, out_name, dest_dir)
+        extract_tar_xz(source, lookup_name, rename, dest_dir, os)
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_tar_gz(source, lookup_name, out_name, dest_dir)
+        extract_tar_gz(source, lookup_name, rename, dest_dir, os)
     } else {
-        save_raw(source, out_name, dest_dir)
+        // Not an archive (e.g. a bare `.exe`): write it under its own name.
+        let out_name = rename.map_or_else(|| filename.to_string(), |r| rename_output(r, os));
+        save_raw(source, &out_name, dest_dir)?;
+        Ok(out_name)
     }
 }
 
 fn extract_zip(
     source: DownloadSource,
     lookup_name: &str,
-    out_name: &str,
+    rename: Option<&str>,
     dest_dir: &Path,
-) -> Result<()> {
+    os: &str,
+) -> Result<String> {
     let rdr: Box<dyn ReadSeek> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -73,13 +108,14 @@ fn extract_zip(
         if file.is_dir() {
             continue;
         }
-        if is_lookup_match(file.name(), lookup_name) {
-            let out_path = dest_dir.join(out_name);
+        if is_entry_match(file.name(), lookup_name, os) {
+            let out_name = entry_out_name(file.name(), rename, os);
+            let out_path = dest_dir.join(&out_name);
             let mut outfile = File::create(&out_path).context("Failed to create output file")?;
             io::copy(&mut file, &mut outfile).context("Failed to write extracted file")?;
             #[cfg(unix)]
             set_permissions(&out_path)?;
-            return Ok(());
+            return Ok(out_name);
         }
     }
     bail!("Executable '{}' not found in archive", lookup_name)
@@ -88,9 +124,10 @@ fn extract_zip(
 fn extract_tar_gz(
     source: DownloadSource,
     lookup_name: &str,
-    out_name: &str,
+    rename: Option<&str>,
     dest_dir: &Path,
-) -> Result<()> {
+    os: &str,
+) -> Result<String> {
     let rdr: Box<dyn Read> = match source {
         DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
         DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
@@ -102,13 +139,14 @@ fn extract_tar_gz(
         if file.header().entry_type().is_dir() {
             continue;
         }
-        if is_lookup_match(&path.to_string_lossy(), lookup_name) {
-            let out_path = dest_dir.join(out_name);
+        if is_entry_match(&path.to_string_lossy(), lookup_name, os) {
+            let out_name = entry_out_name(&path.to_string_lossy(), rename, os);
+            let out_path = dest_dir.join(&out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
             #[cfg(unix)]
             set_permissions(&out_path)?;
-            return Ok(());
+            return Ok(out_name);
         }
     }
     bail!("Executable '{}' not found in archive", lookup_name)
@@ -117,9 +155,10 @@ fn extract_tar_gz(
 fn extract_tar_xz(
     source: DownloadSource,
     lookup_name: &str,
-    out_name: &str,
+    rename: Option<&str>,
     dest_dir: &Path,
-) -> Result<()> {
+    os: &str,
+) -> Result<String> {
     // Stream-decompress xz into a temp file rather than buffering the entire
     // decompressed archive in memory, so the user's --memory-limit setting is
     // respected for .tar.xz payloads.
@@ -146,13 +185,14 @@ fn extract_tar_xz(
         if file.header().entry_type().is_dir() {
             continue;
         }
-        if is_lookup_match(&path.to_string_lossy(), lookup_name) {
-            let out_path = dest_dir.join(out_name);
+        if is_entry_match(&path.to_string_lossy(), lookup_name, os) {
+            let out_name = entry_out_name(&path.to_string_lossy(), rename, os);
+            let out_path = dest_dir.join(&out_name);
             file.unpack(&out_path)
                 .context("Failed to unpack tar entry")?;
             #[cfg(unix)]
             set_permissions(&out_path)?;
-            return Ok(());
+            return Ok(out_name);
         }
     }
     bail!("Executable '{}' not found in archive", lookup_name)
@@ -262,7 +302,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
         assert!(
             result.is_ok(),
             "extract_tar_xz failed: {:?}",
@@ -300,7 +340,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
         assert!(result.is_err());
     }
 
@@ -313,7 +353,7 @@ mod tests {
         let corrupted_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00];
         let source = DownloadSource::Memory(corrupted_data);
 
-        let result = extract_tar_xz(source, "my-app", "my-app", dest);
+        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -331,7 +371,7 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3]);
 
-        let result = extract_and_save(source, "foo.tar.xz", "app", "foo.tar.xz", dest, true);
+        let result = extract_and_save(source, "foo.tar.xz", "app", None, dest, true, "linux");
         assert!(result.is_ok());
 
         let file_path = dest.join("foo.tar.xz");
@@ -346,7 +386,7 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
 
-        let result = extract_and_save(source, "test.bin", "app", "test.bin", dest_dir, true);
+        let result = extract_and_save(source, "test.bin", "app", None, dest_dir, true, "linux");
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("test.bin");
@@ -354,35 +394,47 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
-    fn test_target_bin_name_windows() {
+    fn test_rename_appends_exe_on_windows_target() {
         use tempfile::TempDir;
+
         let temp_dir = TempDir::new().unwrap();
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
 
-        // out_name arrives already .exe-normalized from main.rs
-        let result = extract_and_save(source, "test.bin", "app", "app.exe", dest_dir, false);
-        assert!(result.is_ok());
-
-        let file_path = dest_dir.join("app.exe");
-        assert!(file_path.exists());
+        let written = extract_and_save(
+            source,
+            "test.bin",
+            "app",
+            Some("app"),
+            dest_dir,
+            false,
+            "windows",
+        )
+        .unwrap();
+        assert_eq!(written, "app.exe");
+        assert!(dest_dir.join("app.exe").exists());
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn test_target_bin_name_unix() {
+    fn test_rename_is_verbatim_off_windows_target() {
         use tempfile::TempDir;
 
         let temp_dir = TempDir::new().unwrap();
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![]);
 
-        let result = extract_and_save(source, "test.bin", "app", "app", dest_dir, false);
-        assert!(result.is_ok());
-
-        let file_path = dest_dir.join("app");
-        assert!(file_path.exists());
+        let written = extract_and_save(
+            source,
+            "test.bin",
+            "app",
+            Some("app"),
+            dest_dir,
+            false,
+            "linux",
+        )
+        .unwrap();
+        assert_eq!(written, "app");
+        assert!(dest_dir.join("app").exists());
     }
 
     #[test]
@@ -510,6 +562,78 @@ mod tests {
     }
 
     #[test]
+    fn test_is_entry_match_accepts_exe_candidate_on_windows() {
+        assert!(is_entry_match("a", "a", "windows"));
+        assert!(is_entry_match("a.exe", "a", "windows"));
+        assert!(is_entry_match("app-0.1/a.exe", "a", "windows"));
+        assert!(is_entry_match("dist/pkg/a.exe", "pkg/a", "windows"));
+        assert!(is_entry_match("a.exe", "a.exe", "windows"));
+        // Boundary and stem collisions must still be rejected.
+        assert!(!is_entry_match("xa.exe", "a", "windows"));
+        assert!(!is_entry_match("a.exe.bak", "a", "windows"));
+        assert!(!is_entry_match("LICENSE.pi", "pi", "windows"));
+    }
+
+    #[test]
+    fn test_is_entry_match_is_exact_off_windows() {
+        assert!(is_entry_match("a", "a", "linux"));
+        assert!(!is_entry_match("a.exe", "a", "linux"));
+    }
+
+    #[test]
+    fn test_extract_zip_finds_exe_entry_on_windows_target() {
+        use tempfile::TempDir;
+
+        // Repo basename is `a`, so the default lookup is `a`; the Windows
+        // archive ships the executable as `a.exe`.
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("a-0.1/", b""),
+            ("a-0.1/a.exe", b"binary-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+
+        assert_eq!(written, "a.exe");
+        assert_eq!(fs::read(dest.join("a.exe")).unwrap(), b"binary-bytes");
+    }
+
+    #[test]
+    fn test_extract_zip_exe_entry_not_matched_off_windows() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("a-0.1/", b""),
+            ("a-0.1/a.exe", b"binary-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(source, "a.zip", "a", None, dest, false, "linux");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_zip_keeps_entry_name_without_exe_on_windows() {
+        use tempfile::TempDir;
+
+        // Entry has no `.exe`: it must be written under its own name, not renamed.
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("a-0.1/", b""),
+            ("a-0.1/a", b"binary-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+
+        assert_eq!(written, "a");
+        assert!(dest.join("a").exists());
+        assert!(!dest.join("a.exe").exists());
+    }
+
+    #[test]
     fn test_extract_tar_gz_skips_name_suffix_collision() {
         use tempfile::TempDir;
 
@@ -524,7 +648,15 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let result = extract_and_save(source, "pi-bolt.tar.gz", "pi", "pi-bolt", dest, false);
+        let result = extract_and_save(
+            source,
+            "pi-bolt.tar.gz",
+            "pi",
+            Some("pi-bolt"),
+            dest,
+            false,
+            "linux",
+        );
         assert!(
             result.is_ok(),
             "extract_and_save failed: {:?}",
@@ -548,7 +680,15 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let result = extract_and_save(source, "pi-bolt.tar.xz", "pi", "pi-bolt", dest, false);
+        let result = extract_and_save(
+            source,
+            "pi-bolt.tar.xz",
+            "pi",
+            Some("pi-bolt"),
+            dest,
+            false,
+            "linux",
+        );
         assert!(
             result.is_ok(),
             "extract_and_save failed: {:?}",
@@ -569,7 +709,15 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let result = extract_and_save(source, "app.zip", "pi", "pi-bolt", dest, false);
+        let result = extract_and_save(
+            source,
+            "app.zip",
+            "pi",
+            Some("pi-bolt"),
+            dest,
+            false,
+            "linux",
+        );
         assert!(
             result.is_ok(),
             "extract_and_save failed: {:?}",
@@ -586,7 +734,15 @@ mod tests {
         // Archive holds "my-app"; we look it up by that name but write "renamed".
         let source = DownloadSource::Memory(tar_gz_with("my-app", b"hello"));
 
-        let result = extract_and_save(source, "app.tar.gz", "my-app", "renamed", dest, false);
+        let result = extract_and_save(
+            source,
+            "app.tar.gz",
+            "my-app",
+            Some("renamed"),
+            dest,
+            false,
+            "linux",
+        );
         assert!(
             result.is_ok(),
             "extract_and_save failed: {:?}",
@@ -614,7 +770,15 @@ mod tests {
         let source = DownloadSource::Memory(tar_gz_with("my-app", b"hello"));
 
         // --rename must not be used as a fallback lookup key.
-        let result = extract_and_save(source, "app.tar.gz", "other", "renamed", dest, false);
+        let result = extract_and_save(
+            source,
+            "app.tar.gz",
+            "other",
+            Some("renamed"),
+            dest,
+            false,
+            "linux",
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -632,7 +796,15 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(b"payload".to_vec());
 
-        let result = extract_and_save(source, "asset.tar.gz", "app", "renamed", dest_dir, true);
+        let result = extract_and_save(
+            source,
+            "asset.tar.gz",
+            "app",
+            Some("renamed"),
+            dest_dir,
+            true,
+            "linux",
+        );
         assert!(result.is_ok());
 
         assert!(dest_dir.join("renamed").exists());

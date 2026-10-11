@@ -5,7 +5,7 @@ use clap::Parser;
 use grd::{
     asset,
     cli::{Args, Command},
-    config, confirm_upgrade, download, extract, github, state,
+    config, confirm_upgrade, download, extract, github, naming, state,
 };
 
 /// Filename looked up inside the release archive: `--bin-name` when given,
@@ -29,42 +29,18 @@ fn validate_rename(rename: &str) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the filename written to disk.
+/// Output filename that is known before extraction, if any.
 ///
-/// `--rename` always wins. Under `--no-decompress` nothing is extracted, so
-/// without `--rename` the asset keeps its own filename (today's behavior);
-/// otherwise the lookup name doubles as the output name.
-fn resolve_out_name(
-    rename: Option<&str>,
-    lookup_name: &str,
-    asset_name: &str,
-    no_decompress: bool,
-) -> String {
-    match rename {
-        Some(rename) => rename.to_string(),
-        None if no_decompress => asset_name.to_string(),
-        None => lookup_name.to_string(),
-    }
-}
-
-/// Drop a trailing `.exe` so `--rename fd.exe` and `--rename fd` agree.
-fn strip_exe_suffix(name: &str) -> &str {
-    if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
-        &name[..name.len() - 4]
+/// An explicit `--rename` (with the Windows `.exe` rule) or the asset's own
+/// name under `--no-decompress` is known up front; otherwise the name comes
+/// from the matched archive entry and is only known after extraction.
+fn resolve_known_out_name(args: &Args, asset_name: &str, os: &str) -> Option<String> {
+    if let Some(rename) = &args.rename {
+        Some(naming::rename_output(rename, os))
+    } else if args.no_decompress {
+        Some(asset_name.to_string())
     } else {
-        name
-    }
-}
-
-/// Apply the platform naming rule once, so the same string is used for the
-/// target path, the extraction output, and the recorded state entry.
-fn out_file_name(out_name: &str, no_decompress: bool) -> String {
-    if no_decompress {
-        out_name.to_string()
-    } else if cfg!(windows) {
-        format!("{}.exe", strip_exe_suffix(out_name))
-    } else {
-        out_name.to_string()
+        None
     }
 }
 
@@ -242,24 +218,22 @@ fn main() -> Result<()> {
     println!("Selected asset: {}", asset.name);
 
     let lookup_name = resolve_lookup_name(&args, repo);
-    let out_name = resolve_out_name(
-        args.rename.as_deref(),
-        &lookup_name,
-        &asset.name,
-        args.no_decompress,
-    );
-    // One normalization pass: the same string feeds the target path, the
-    // extractor, and the state entry, so they cannot drift apart.
-    let out_file = out_file_name(&out_name, args.no_decompress);
-    let target_path = dest.join(&out_file);
+
+    // The output filename is known before extraction only for an explicit
+    // `--rename` or `--no-decompress`; otherwise it is the matched archive
+    // entry's own name, which only the extractor can report.
+    let known_out = resolve_known_out_name(&args, &asset.name, &os);
+
+    let cache = state::State::load();
+    let cached = cache.get_cached(repo);
+    let cached_tag = cached.map(|c| c.tag.clone());
+    let predicted_out = known_out.or_else(|| cached.map(|c| c.installed_filename(repo)));
+    let is_same_version =
+        cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
+    let installed_path = predicted_out.as_ref().map(|name| dest.join(name));
 
     if args.dry_run {
-        let cache = state::State::load();
-        let cached = cache.get_cached(repo);
-        let is_same_version =
-            cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
-
-        if !args.force && target_path.exists() && is_same_version {
+        if !args.force && is_same_version && installed_path.as_ref().is_some_and(|p| p.exists()) {
             println!(
                 "[dry-run] already at {} {}; no action",
                 asset.name, release.tag_name
@@ -268,7 +242,7 @@ fn main() -> Result<()> {
         }
         println!(
             "[dry-run] would install '{}' to {}",
-            out_file,
+            predicted_out.as_deref().unwrap_or(&lookup_name),
             dest.display()
         );
         println!(
@@ -278,41 +252,37 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if !args.force && target_path.exists() {
-        let cache = state::State::load();
-        let cached = cache.get_cached(repo);
-        let is_same_version =
-            cached.is_some_and(|c| c.tag == release.tag_name && c.asset == asset.name);
+    if !args.force && is_same_version && installed_path.as_ref().is_some_and(|p| p.exists()) {
+        println!("Already at {} version {}", asset.name, release.tag_name);
+        return Ok(());
+    }
 
-        if is_same_version {
-            println!("Already at {} version {}", asset.name, release.tag_name);
-            return Ok(());
+    // Prompt for upgrade only when an install exists and the tag is not pinned.
+    if !args.force
+        && args.tag.is_none()
+        && installed_path.as_ref().is_some_and(|p| p.exists())
+        && let Some(cached_tag) = &cached_tag
+        && !args.yes
+    {
+        if !std::io::stdin().is_terminal() {
+            bail!("refusing to prompt for upgrade in non-interactive mode; pass -y to proceed");
         }
-
-        // Prompt for upgrade only when tag is not explicitly pinned
-        if args.tag.is_none()
-            && let Some(cached) = cached
-            && !args.yes
-        {
-            if !std::io::stdin().is_terminal() {
-                bail!("refusing to prompt for upgrade in non-interactive mode; pass -y to proceed");
-            }
-            if !confirm_upgrade(&cached.tag, &release.tag_name) {
-                println!("Upgrade cancelled.");
-                return Ok(());
-            }
+        if !confirm_upgrade(cached_tag, &release.tag_name) {
+            println!("Upgrade cancelled.");
+            return Ok(());
         }
     }
 
     let source = download::download_asset(&agent, &asset, args.memory_limit)?;
 
-    extract::extract_and_save(
+    let out_file = extract::extract_and_save(
         source,
         &asset.name,
         &lookup_name,
-        &out_file,
+        args.rename.as_deref(),
         &dest,
         args.no_decompress,
+        &os,
     )?;
 
     let mut cache = state::State::load();
@@ -375,71 +345,35 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_out_name_rename_wins_over_lookup() {
+    fn test_resolve_known_out_name_rename_appends_exe_on_windows() {
+        let args = Args::parse_from(["grd", "owner/prj", "--rename", "tool"]);
         assert_eq!(
-            resolve_out_name(Some("exe2"), "exe1", "asset.tar.gz", false),
-            "exe2"
+            resolve_known_out_name(&args, "asset.tar.gz", "windows"),
+            Some("tool.exe".to_string())
         );
     }
 
     #[test]
-    fn test_resolve_out_name_defaults_to_lookup_name() {
-        assert_eq!(resolve_out_name(None, "prj", "asset.tar.gz", false), "prj");
-    }
-
-    #[test]
-    fn test_resolve_out_name_no_decompress_defaults_to_asset() {
+    fn test_resolve_known_out_name_rename_verbatim_off_windows() {
+        let args = Args::parse_from(["grd", "owner/prj", "--rename", "tool"]);
         assert_eq!(
-            resolve_out_name(None, "prj", "asset.tar.gz", true),
-            "asset.tar.gz"
+            resolve_known_out_name(&args, "asset.tar.gz", "linux"),
+            Some("tool".to_string())
         );
     }
 
     #[test]
-    fn test_resolve_out_name_no_decompress_honors_rename() {
+    fn test_resolve_known_out_name_no_decompress_uses_asset_name() {
+        let args = Args::parse_from(["grd", "owner/prj", "--no-decompress"]);
         assert_eq!(
-            resolve_out_name(Some("exe2"), "prj", "asset.tar.gz", true),
-            "exe2"
+            resolve_known_out_name(&args, "asset.tar.gz", "linux"),
+            Some("asset.tar.gz".to_string())
         );
     }
 
     #[test]
-    fn test_strip_exe_suffix_is_case_insensitive() {
-        assert_eq!(strip_exe_suffix("fd.exe"), "fd");
-        assert_eq!(strip_exe_suffix("fd.EXE"), "fd");
-        assert_eq!(strip_exe_suffix("fd.Exe"), "fd");
-    }
-
-    #[test]
-    fn test_strip_exe_suffix_leaves_other_names_alone() {
-        assert_eq!(strip_exe_suffix("fd"), "fd");
-        assert_eq!(strip_exe_suffix("fd.tar.gz"), "fd.tar.gz");
-        assert_eq!(strip_exe_suffix("fd.exe.bak"), "fd.exe.bak");
-        // A bare ".exe" has no stem left to keep.
-        assert_eq!(strip_exe_suffix(".exe"), ".exe");
-    }
-
-    #[test]
-    fn test_out_file_name_no_decompress_keeps_name_verbatim() {
-        // A raw asset keeps its extension; no .exe rewriting happens.
-        assert_eq!(
-            out_file_name("asset.tar.gz", true),
-            "asset.tar.gz".to_string()
-        );
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_out_file_name_unix_is_verbatim() {
-        assert_eq!(out_file_name("fd", false), "fd");
-        assert_eq!(out_file_name("fd.exe", false), "fd.exe");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn test_out_file_name_windows_appends_single_exe() {
-        assert_eq!(out_file_name("fd", false), "fd.exe");
-        assert_eq!(out_file_name("fd.exe", false), "fd.exe");
-        assert_eq!(out_file_name("fd.EXE", false), "fd.exe");
+    fn test_resolve_known_out_name_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/prj"]);
+        assert_eq!(resolve_known_out_name(&args, "asset.tar.gz", "linux"), None);
     }
 }

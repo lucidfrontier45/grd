@@ -4,6 +4,7 @@ pub mod config;
 pub mod download;
 pub mod extract;
 pub mod github;
+pub mod naming;
 pub mod state;
 
 use std::io::{BufRead, Write};

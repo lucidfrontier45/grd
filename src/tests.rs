@@ -7,7 +7,7 @@ use crate::{
     asset::{Selection, find_asset},
     cli::{Args, Command},
     config::{configure_agent, get_auth_token},
-    download::download_asset,
+    download::{DownloadSource, download_asset},
     extract::extract_and_save,
     github::fetch_release_info,
     state::State,
@@ -101,24 +101,23 @@ fn test_integration_download_extract_save() {
 
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
-    let bin_name = "rg";
-    let expected_name = if cfg!(windows) {
-        format!("{}.exe", bin_name)
-    } else {
-        bin_name.to_string()
-    };
 
     let result = extract_and_save(
         source,
         &asset.name,
-        bin_name,
-        &expected_name,
+        "rg",
+        None,
         dest_dir,
         false,
+        env::consts::OS,
     );
-    assert!(result.is_ok());
+    let extracted_name = result.unwrap();
 
-    let extracted_path = dest_dir.join(&expected_name);
+    // The entry keeps its own name: `rg` on unix, `rg.exe` on Windows.
+    let expected_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+    assert_eq!(extracted_name, expected_name);
+
+    let extracted_path = dest_dir.join(&extracted_name);
     assert!(extracted_path.exists());
 }
 
@@ -148,21 +147,73 @@ fn test_integration_download_extract_save_renamed() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
 
-    let lookup_name = "rg";
-    let out_name = if cfg!(windows) {
+    let result = extract_and_save(
+        source,
+        &asset.name,
+        "rg",
+        Some("rg-renamed"),
+        dest_dir,
+        false,
+        env::consts::OS,
+    );
+    let out_name = result.unwrap();
+
+    let expected = if cfg!(windows) {
         "rg-renamed.exe"
     } else {
         "rg-renamed"
     };
-
-    let result = extract_and_save(source, &asset.name, lookup_name, out_name, dest_dir, false);
-    assert!(result.is_ok());
-
-    assert!(dest_dir.join(out_name).exists(), "renamed binary missing");
+    assert_eq!(out_name, expected);
+    assert!(dest_dir.join(&out_name).exists(), "renamed binary missing");
     assert!(
-        !dest_dir.join(lookup_name).exists(),
+        !dest_dir.join("rg").exists(),
         "the lookup name must not be written alongside the rename value"
     );
+}
+
+/// Build a single-entry `.zip` (nested names allowed) holding `content`.
+fn zip_with_entry(entry: &str, content: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+
+    use zip::write::SimpleFileOptions;
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buf);
+        writer
+            .start_file(entry, SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(content).unwrap();
+        writer.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// Regression: with the default lookup name (the repo basename `a`) and no
+/// `--bin-name`, a Windows target must find `a.exe` in the archive and keep the
+/// entry's own name on disk.
+#[test]
+fn test_default_lookup_finds_exe_in_zip_on_windows_target() {
+    let source = DownloadSource::Memory(zip_with_entry("a-0.1/a.exe", b"binary-bytes"));
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path();
+
+    let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+
+    assert_eq!(written, "a.exe");
+    assert_eq!(std::fs::read(dest.join("a.exe")).unwrap(), b"binary-bytes");
+}
+
+/// The `.exe` candidate is Windows-only: a non-Windows target must not match
+/// `a.exe` when looking up `a`.
+#[test]
+fn test_default_lookup_ignores_exe_in_zip_off_windows_target() {
+    let source = DownloadSource::Memory(zip_with_entry("a-0.1/a.exe", b"binary-bytes"));
+    let dir = TempDir::new().unwrap();
+
+    let result = extract_and_save(source, "a.zip", "a", None, dir.path(), false, "linux");
+
+    assert!(result.is_err());
 }
 
 #[test]
