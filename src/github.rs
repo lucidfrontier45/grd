@@ -10,6 +10,15 @@ fn is_rate_limited(status: u16) -> bool {
     status == 403
 }
 
+/// GitHub allows alphanumeric, '.', '_', '-' in owner and repo names.
+fn is_valid_segment(s: &str) -> bool {
+    !s.is_empty() && s != "." && s != ".." && s.chars().all(is_valid_char)
+}
+
+fn is_valid_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'
+}
+
 /// Validate that `repo` is a syntactically valid `owner/repo` identifier and
 /// return its components. Rejects characters that would be unsafe to interpolate
 /// directly into a URL path (whitespace, `#`, `?`, etc.).
@@ -17,15 +26,6 @@ fn validate_repo(repo: &str) -> Result<(&str, &str)> {
     let (owner, name) = repo.split_once('/').ok_or_else(|| {
         anyhow::anyhow!("Repository must be in 'owner/repo' format (got '{repo}')")
     })?;
-
-    // GitHub allows alphanumeric, '.', '_', '-' in owner and repo names.
-    let is_valid_segment = |s: &str| {
-        !s.is_empty()
-            && s != "."
-            && s != ".."
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
-    };
 
     if !is_valid_segment(owner) || !is_valid_segment(name) || name.contains('/') {
         bail!(

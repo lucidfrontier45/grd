@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::HashMap,
     io::{self, IsTerminal, Write},
 };
@@ -94,36 +95,85 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+// --------------- OS/arch vocabulary ---------------
+//
+// One set of token tables shared by the candidate filter (`collect_matches`)
+// and the scorer (`calculate_match_score`). Only the vocabulary is shared:
+// the filter is inclusive/existential while the scorer is weighted with
+// cross-OS exclusions and a musl bonus, so each consumer keeps its own rules
+// on top of these lists.
+
+/// Canonical arch → tokens naming it in a release asset name. The scorer uses
+/// these as-is; the candidate filter applies [`WINDOWS_X86_64_TOKENS`] on top.
+static ARCH_ALIASES: &[(&str, &[&str])] = &[
+    ("x86_64", &["x86_64", "amd64", "x64", "win64"]),
+    ("aarch64", &["aarch64", "arm64"]),
+    ("loong64", &["loong64", "loongarch64"]),
+];
+
+/// Word-size tokens naming `x86_64`, which appear only in windows asset
+/// names (`win64`/`win32` describe the Windows API). The candidate filter
+/// counts them for windows targets only; the scorer historically counts
+/// `win64` on every OS and `win32` on none — kept so scores stay identical.
+static WINDOWS_X86_64_TOKENS: &[&str] = &["win64", "win32"];
+
+/// Arch tokens of archs `grd` does not target but that appear in release
+/// names. They still count as an explicit arch, blocking the default-arch
+/// fallback.
+static OTHER_ARCH_TOKENS: &[&str] = &[
+    "i686", "i386", "x86", "armhf", "armv7", "riscv64", "riscv32", "ppc64le", "ppc64", "powerpc",
+    "s390x", "mips",
+];
+
+/// EABI triples (`gnueabi`/`musleabi`, with or without `hf`) name 32-bit ARM.
+static ARM_EABI_TOKENS: &[&str] = &["gnueabi", "musleabi"];
+
+/// Canonical os → tokens naming it in a release asset name.
+static OS_ALIASES: &[(&str, &[&str])] = &[
+    (
+        "windows",
+        &["windows", "pc-windows", "win64", "win32", "win"],
+    ),
+    ("macos", &["apple-darwin", "darwin", "macos"]),
+    ("linux", &["linux", "unknown-linux"]),
+];
+
+/// Competing-OS tokens that disqualify a name for the keyed os when scoring:
+/// `darwin` never counts for windows (and `win` would otherwise match inside
+/// it), `windows` never counts for macos.
+static OS_EXCLUSIONS: &[(&str, &[&str])] = &[("windows", &["darwin"]), ("macos", &["windows"])];
+
+/// Tokens recorded for `key` in a vocabulary table, or `&[]` when unknown.
+fn vocab(
+    table: &'static [(&'static str, &'static [&'static str])],
+    key: &str,
+) -> &'static [&'static str] {
+    table
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or(&[], |(_, tokens)| *tokens)
+}
+
+/// Every arch token in the vocabulary, targeted or not.
+fn arch_tokens() -> impl Iterator<Item = &'static str> {
+    ARCH_ALIASES
+        .iter()
+        .flat_map(|(_, tokens)| tokens.iter().copied())
+        .chain(WINDOWS_X86_64_TOKENS.iter().copied())
+        .chain(OTHER_ARCH_TOKENS.iter().copied())
+        .chain(ARM_EABI_TOKENS.iter().copied())
+}
+
+/// True when `name` names any architecture explicitly — targeted or not —
+/// via a token, in which case the default-arch fallback must not apply.
+/// 32-bit ARM comes as a bare `arm` token or an ARM EABI triple:
+/// sharkdp/fd ships `arm-unknown-linux-gnueabihf` /
+/// `arm-unknown-linux-musleabihf`; without recognizing these as explicit
+/// archs, the linux default-arch fallback (x86_64) would match them for
+/// linux/x86_64 targets.
 fn has_explicit_arch_pattern(name: &str) -> bool {
     let name = name.to_lowercase();
-    name.contains("x86_64")
-        || name.contains("amd64")
-        || name.contains("x64")
-        || name.contains("aarch64")
-        || name.contains("arm64")
-        || name.contains("loong64")
-        || name.contains("loongarch64")
-        || name.contains("i686")
-        || name.contains("i386")
-        || name.contains("armhf")
-        || name.contains("armv7")
-        || name.contains("riscv64")
-        || name.contains("riscv32")
-        || name.contains("ppc64le")
-        || name.contains("ppc64")
-        || name.contains("powerpc")
-        || name.contains("s390x")
-        || name.contains("mips")
-        || name.contains("win64")
-        || name.contains("win32")
-        || name.contains("x86")
-        // 32-bit ARM: a bare `arm` token or an ARM EABI triple. sharkdp/fd
-        // ships `arm-unknown-linux-gnueabihf` / `arm-unknown-linux-musleabihf`;
-        // without recognizing these as explicit archs, the linux default-arch
-        // fallback (x86_64) would match them for linux/x86_64 targets.
-        || has_bare_arm_token(&name)
-        || name.contains("gnueabi")
-        || name.contains("musleabi")
+    arch_tokens().any(|t| name.contains(t)) || has_bare_arm_token(&name)
 }
 
 /// True when `name` contains `arm` as a standalone token (delimited by
@@ -225,69 +275,49 @@ fn is_allowed_by_extension(name: &str) -> bool {
 
 fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
     let name = asset_name.to_lowercase();
-    let mut score = 0;
 
-    let os_patterns = match target_os {
-        "windows" => vec!["windows", "pc-windows", "win64", "win32", "win"],
-        "macos" => vec!["apple-darwin", "darwin", "macos"],
-        "linux" => vec!["linux", "unknown-linux"],
-        _ => vec![],
-    };
-
-    let arch_patterns = match target_arch {
-        "x86_64" => vec!["x86_64", "amd64", "x64", "win64"],
-        "aarch64" => vec!["aarch64", "arm64"],
-        "loong64" => vec!["loong64", "loongarch64"],
-        _ => vec![],
-    };
-
-    let os_exclusions = match target_os {
-        "windows" => vec!["darwin"],
-        "macos" => vec!["windows"],
-        _ => vec![],
-    };
-
-    for exclusion in &os_exclusions {
-        if name.contains(exclusion) {
-            return score;
-        }
+    if os_excludes(&name, target_os) {
+        return 0;
     }
 
-    let exact_os_pattern = match target_os {
-        "windows" => "windows",
-        "macos" => "macos",
-        "linux" => "linux",
-        _ => "",
-    };
+    os_score(&name, target_os) + arch_score(&name, target_arch) + musl_bonus(&name, target_os)
+}
 
-    if !exact_os_pattern.is_empty() && name.contains(exact_os_pattern) {
-        score += 2;
-    } else {
-        for pattern in &os_patterns {
-            if name.contains(pattern) {
-                score += 1;
-                break;
-            }
-        }
+/// True when `name` carries a competing OS's token (see [`OS_EXCLUSIONS`]).
+fn os_excludes(name: &str, os: &str) -> bool {
+    vocab(OS_EXCLUSIONS, os).iter().any(|t| name.contains(t))
+}
+
+/// 2 points for the exact os token, 1 for an os alias (see [`OS_ALIASES`]).
+fn os_score(name: &str, target_os: &str) -> i32 {
+    let aliases = vocab(OS_ALIASES, target_os);
+    if aliases.is_empty() {
+        return 0;
     }
-
-    for pattern in &arch_patterns {
-        if name.contains(pattern) {
-            score += 1;
-            break;
-        }
+    if name.contains(target_os) {
+        return 2;
     }
+    i32::from(aliases.iter().any(|t| name.contains(t)))
+}
 
-    // On linux, prefer statically linked musl builds when a release ships both
-    // a glibc (`gnu`) and a musl asset for the same arch: the bonus breaks the
-    // tie so `best_unique_match` resolves it instead of yielding
-    // `Selection::Multiple`. No gnu penalty — a libc-neutral asset must not be
-    // demoted below glibc, which was not asked for.
-    if target_os == "linux" && has_musl_token(&name) {
-        score += 1;
-    }
+/// 1 point when the name names the target arch (see [`ARCH_ALIASES`]). The
+/// scorer has no default-arch fallback and no windows gating: `win64` counts
+/// as `x86_64` on every OS, `win32` never does.
+fn arch_score(name: &str, target_arch: &str) -> i32 {
+    i32::from(
+        vocab(ARCH_ALIASES, target_arch)
+            .iter()
+            .any(|t| name.contains(t)),
+    )
+}
 
-    score
+/// On linux, prefer statically linked musl builds when a release ships both
+/// a glibc (`gnu`) and a musl asset for the same arch: the bonus breaks the
+/// tie so `best_unique_match` resolves it instead of yielding
+/// `Selection::Multiple`. No gnu penalty — a libc-neutral asset must not be
+/// demoted below glibc, which was not asked for.
+fn musl_bonus(name: &str, target_os: &str) -> i32 {
+    i32::from(target_os == "linux" && has_musl_token(name))
 }
 
 fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
@@ -300,34 +330,51 @@ fn sort_by_score(assets: &mut Vec<&Asset>, target_os: &str, target_arch: &str) {
     });
 }
 
+/// Tracks the highest score seen and the first asset reaching it.
+struct TopScored<'a> {
+    leader: Option<&'a Asset>,
+    score: i32,
+    ties: usize,
+}
+
+impl<'a> TopScored<'a> {
+    fn new() -> Self {
+        Self {
+            leader: None,
+            score: i32::MIN,
+            ties: 0,
+        }
+    }
+
+    /// Record one asset's score; the first leader wins ties.
+    fn push(&mut self, asset: &'a Asset, score: i32) {
+        match score.cmp(&self.score) {
+            Ordering::Greater => {
+                self.leader = Some(asset);
+                self.score = score;
+                self.ties = 1;
+            }
+            Ordering::Equal => self.ties += 1,
+            Ordering::Less => {}
+        }
+    }
+}
+
 fn best_unique_match<'a>(
     assets: &[&'a Asset],
     target_os: &str,
     target_arch: &str,
 ) -> Option<&'a Asset> {
-    let mut best: Option<(&'a Asset, i32)> = None;
-    let mut best_count = 0;
-
+    let mut top = TopScored::new();
     for asset in assets {
-        let score = calculate_match_score(&asset.name, target_os, target_arch);
-        match best {
-            None => {
-                best = Some((asset, score));
-                best_count = 1;
-            }
-            Some((_, best_score)) if score > best_score => {
-                best = Some((asset, score));
-                best_count = 1;
-            }
-            Some((_, best_score)) if score == best_score => {
-                best_count += 1;
-            }
-            _ => {}
-        }
+        top.push(
+            asset,
+            calculate_match_score(&asset.name, target_os, target_arch),
+        );
     }
 
-    if best_count == 1 {
-        return best.map(|(asset, _)| asset);
+    if top.ties == 1 {
+        return top.leader;
     }
 
     // Tie among top scorers: a lone `.zip` in that tied set wins. This is a
@@ -335,20 +382,27 @@ fn best_unique_match<'a>(
     // precisely-matched `.tar.gz` still beats a vague `.zip`, and a musl
     // `.tar.gz` (primary 4) still beats a glibc `.zip` (primary 3). No zip, or
     // more than one, leaves the set genuinely ambiguous → `None`.
-    let best_score = best.map(|(_, score)| score)?;
+    lone_zip_at_score(assets, top.score, target_os, target_arch)
+}
+
+/// The lone `.zip` among assets tied at `score`, if exactly one exists.
+fn lone_zip_at_score<'a>(
+    assets: &[&'a Asset],
+    score: i32,
+    target_os: &str,
+    target_arch: &str,
+) -> Option<&'a Asset> {
     let mut zips = assets
         .iter()
-        .filter(|asset| {
-            calculate_match_score(&asset.name, target_os, target_arch) == best_score
-                && is_zip(&asset.name)
-        })
-        .copied();
+        .copied()
+        .filter(|asset| is_zip_at_score(asset, score, target_os, target_arch));
     let candidate = zips.next()?;
-    if zips.next().is_none() {
-        Some(candidate)
-    } else {
-        None
-    }
+    zips.next().is_none().then_some(candidate)
+}
+
+/// True when `asset` is a `.zip` tied at `score`.
+fn is_zip_at_score(asset: &Asset, score: i32, target_os: &str, target_arch: &str) -> bool {
+    calculate_match_score(&asset.name, target_os, target_arch) == score && is_zip(&asset.name)
 }
 
 fn canonical_arch_for_matching(arch: &str) -> String {
@@ -443,39 +497,22 @@ fn resolve_candidates<'a>(
     exclude: Option<&str>,
     no_ext_filter: bool,
 ) -> (Vec<&'a Asset>, Option<Asset>) {
-    let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
-        s.split(',').map(|w| w.trim().to_lowercase()).collect()
-    });
-
-    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
-    let normalized_arch = canonical_arch_for_matching(arch);
-
-    let effective_arch = if inferred_arch.is_some() {
-        inferred_arch
-    } else {
-        Some(normalized_arch)
-    };
+    let blacklist = parse_blacklist(exclude);
+    let (normalized_os, effective_arch) = matching_platform(os, arch);
 
     let matches = collect_matches(
         assets,
         &blacklist,
         &normalized_os,
-        &effective_arch,
+        &Some(effective_arch.clone()),
         no_ext_filter,
     );
 
-    if let Some(asset) = best_unique_match(
-        &matches,
-        &normalized_os,
-        effective_arch.as_deref().unwrap_or(arch),
-    ) {
+    if let Some(asset) = best_unique_match(&matches, &normalized_os, &effective_arch) {
         return (matches, Some(asset.clone()));
     }
 
-    if matches.len() > 1
-        && normalized_os == "windows"
-        && effective_arch.as_deref() == Some("x86_64")
-    {
+    if matches.len() > 1 && normalized_os == "windows" && effective_arch == "x86_64" {
         let win64: Vec<&Asset> = matches
             .iter()
             .filter(|a| a.name.to_lowercase().contains("win64"))
@@ -509,6 +546,21 @@ pub fn find_asset(
     }
 }
 
+/// The normalized OS and the arch to match against: the alias-inferred arch
+/// (`win32`/`win64` names imply `x86_64`) or the canonicalized `arch`.
+fn matching_platform(os: &str, arch: &str) -> (String, String) {
+    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
+    let effective_arch = inferred_arch.unwrap_or_else(|| canonical_arch_for_matching(arch));
+    (normalized_os, effective_arch)
+}
+
+/// `--exclude` words, trimmed and lowercased.
+fn parse_blacklist(exclude: Option<&str>) -> Vec<String> {
+    exclude.map_or_else(Vec::new, |s| {
+        s.split(',').map(|w| w.trim().to_lowercase()).collect()
+    })
+}
+
 pub fn select_asset(
     assets: &[Asset],
     os: &str,
@@ -517,69 +569,105 @@ pub fn select_asset(
     exclude: Option<&str>,
     no_ext_filter: bool,
 ) -> Result<AssetSelection> {
-    let stdin_is_terminal = if cfg!(test) {
+    ensure_interactive_input(mode)?;
+    match mode {
+        SelectMode::All => select_interactive_all(assets, os, arch, exclude, no_ext_filter),
+        SelectMode::Filtered => select_filtered(assets, os, arch, exclude, no_ext_filter),
+        SelectMode::Default => select_default(assets, os, arch, exclude, no_ext_filter),
+    }
+}
+
+/// Interactive modes require a terminal on stdin.
+fn ensure_interactive_input(mode: SelectMode) -> Result<()> {
+    if matches!(mode, SelectMode::Filtered | SelectMode::All) && !stdin_is_terminal() {
+        bail!("Cannot select asset in non-terminal environment");
+    }
+    Ok(())
+}
+
+/// Reports a terminal on stdin; always `false` under `cfg!(test)` so the
+/// interactive modes bail in unit tests.
+fn stdin_is_terminal() -> bool {
+    if cfg!(test) {
         false
     } else {
         io::stdin().is_terminal()
-    };
-    if matches!(mode, SelectMode::Filtered | SelectMode::All) && !stdin_is_terminal {
-        bail!("Cannot select asset in non-terminal environment");
     }
+}
 
-    let (normalized_os, inferred_arch) = normalize_platform_identifier(os);
-    let normalized_arch = canonical_arch_for_matching(arch);
-    let effective_arch = inferred_arch.or(Some(normalized_arch));
-    let arch_ref = effective_arch.as_deref().unwrap_or(arch);
+/// `SelectMode::All`: browse every asset in the release interactively.
+fn select_interactive_all(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    exclude: Option<&str>,
+    no_ext_filter: bool,
+) -> Result<AssetSelection> {
+    let (normalized_os, effective_arch) = matching_platform(os, arch);
+    let blacklist = parse_blacklist(exclude);
+    let selected = interactive_select(
+        assets,
+        &blacklist,
+        &normalized_os,
+        &effective_arch,
+        "Select an asset:",
+        no_ext_filter,
+    )?;
+    Ok(AssetSelection::Single(selected))
+}
 
-    match mode {
-        SelectMode::All => {
-            let blacklist: Vec<String> = exclude.map_or_else(Vec::new, |s| {
-                s.split(',').map(|w| w.trim().to_lowercase()).collect()
-            });
-            let selected = interactive_select(
-                assets,
-                &blacklist,
-                &normalized_os,
-                &effective_arch,
-                arch,
-                "Select an asset:",
-                no_ext_filter,
-            )?;
-            Ok(AssetSelection::Single(selected))
-        }
-        SelectMode::Filtered => {
-            let mut matches = resolve_candidates(assets, os, arch, exclude, no_ext_filter).0;
-            if matches.is_empty() {
-                bail!("No matching asset found for {normalized_os}-{arch_ref}");
-            }
-            sort_by_score(&mut matches, &normalized_os, arch_ref);
-            println!("Select a matching asset:");
-            show_all_assets(&matches, &normalized_os, arch_ref);
-            let selected = collect_selection(&matches)?;
-            Ok(AssetSelection::Single(selected.clone()))
-        }
-        SelectMode::Default => match find_asset(assets, os, arch, exclude, no_ext_filter) {
-            Selection::Exact(asset) => Ok(AssetSelection::Single(asset)),
-            Selection::Multiple(matches) => {
-                let mut sorted = matches.iter().collect::<Vec<_>>();
-                sort_by_score(&mut sorted, &normalized_os, arch_ref);
-                Ok(AssetSelection::Multiple(
-                    sorted.into_iter().cloned().collect(),
-                ))
-            }
-            Selection::None => {
-                bail!("No matching asset found for {normalized_os}-{arch_ref}")
-            }
-        },
+/// `SelectMode::Filtered`: pick interactively among platform matches.
+fn select_filtered(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    exclude: Option<&str>,
+    no_ext_filter: bool,
+) -> Result<AssetSelection> {
+    let (normalized_os, effective_arch) = matching_platform(os, arch);
+    let mut matches = resolve_candidates(assets, os, arch, exclude, no_ext_filter).0;
+    if matches.is_empty() {
+        bail!("No matching asset found for {normalized_os}-{effective_arch}");
     }
+    sort_by_score(&mut matches, &normalized_os, &effective_arch);
+    println!("Select a matching asset:");
+    show_all_assets(&matches, &normalized_os, &effective_arch);
+    let selected = collect_selection(&matches)?;
+    Ok(AssetSelection::Single(selected.clone()))
+}
+
+/// `SelectMode::Default`: auto-pick the best-matching asset.
+fn select_default(
+    assets: &[Asset],
+    os: &str,
+    arch: &str,
+    exclude: Option<&str>,
+    no_ext_filter: bool,
+) -> Result<AssetSelection> {
+    let (normalized_os, effective_arch) = matching_platform(os, arch);
+    match find_asset(assets, os, arch, exclude, no_ext_filter) {
+        Selection::Exact(asset) => Ok(AssetSelection::Single(asset)),
+        Selection::Multiple(matches) => Ok(AssetSelection::Multiple(sorted_clones(
+            &matches,
+            &normalized_os,
+            &effective_arch,
+        ))),
+        Selection::None => bail!("No matching asset found for {normalized_os}-{effective_arch}"),
+    }
+}
+
+/// `matches` cloned and ordered by score (best first).
+fn sorted_clones(matches: &[Asset], os: &str, arch: &str) -> Vec<Asset> {
+    let mut sorted: Vec<&Asset> = matches.iter().collect();
+    sort_by_score(&mut sorted, os, arch);
+    sorted.into_iter().cloned().collect()
 }
 
 fn interactive_select(
     assets: &[Asset],
     blacklist: &[String],
     normalized_os: &str,
-    effective_arch: &Option<String>,
-    arch: &str,
+    effective_arch: &str,
     prompt: &str,
     no_ext_filter: bool,
 ) -> Result<Asset> {
@@ -590,24 +678,15 @@ fn interactive_select(
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
-            (no_ext_filter || is_allowed_by_extension(&name))
-                && !blacklist.iter().any(|b| name.contains(b))
+            passes_static_filters(&name, blacklist, no_ext_filter)
         })
         .collect();
     if all_assets.is_empty() {
         bail!("No assets available after applying filters");
     }
-    sort_by_score(
-        &mut all_assets,
-        normalized_os,
-        effective_arch.as_deref().unwrap_or(arch),
-    );
+    sort_by_score(&mut all_assets, normalized_os, effective_arch);
     println!("{prompt}");
-    show_all_assets(
-        &all_assets,
-        normalized_os,
-        effective_arch.as_deref().unwrap_or(arch),
-    );
+    show_all_assets(&all_assets, normalized_os, effective_arch);
     let selected = collect_selection(&all_assets)?;
     Ok(selected.clone())
 }
@@ -623,53 +702,82 @@ fn collect_matches<'a>(
         .iter()
         .filter(|a| {
             let name = a.name.to_lowercase();
-
-            let ext_ok = no_ext_filter || is_allowed_by_extension(&name);
-
-            let os_match = match normalized_os {
-                "windows" => {
-                    (name.contains("windows")
-                        || name.contains("win64")
-                        || name.contains("pc-windows")
-                        || name.contains("win32")
-                        || name.contains("win"))
-                        && !name.contains("darwin")
-                }
-                "macos" => {
-                    name.contains("apple-darwin")
-                        || name.contains("macos")
-                        || name.contains("darwin")
-                }
-                "linux" => name.contains("linux") || name.contains("unknown-linux"),
-                _ => false,
-            };
-            let arch_match = match effective_arch.as_deref() {
-                Some("x86_64") => {
-                    name.contains("x86_64")
-                        || name.contains("amd64")
-                        || name.contains("x64")
-                        || (normalized_os == "windows" && name.contains("win64"))
-                        || (normalized_os == "windows" && name.contains("win32"))
-                        || (!has_explicit_arch_pattern(&name)
-                            && default_arch_for_os(normalized_os) == Some("x86_64"))
-                }
-                Some("aarch64") => {
-                    name.contains("aarch64")
-                        || name.contains("arm64")
-                        || (!has_explicit_arch_pattern(&name)
-                            && default_arch_for_os(normalized_os) == Some("aarch64"))
-                }
-                Some("loong64") => {
-                    name.contains("loong64")
-                        || name.contains("loongarch64")
-                        || (!has_explicit_arch_pattern(&name)
-                            && default_arch_for_os(normalized_os) == Some("loong64"))
-                }
-                _ => false,
-            };
-            ext_ok && os_match && arch_match && !blacklist.iter().any(|b| name.contains(b))
+            is_candidate(
+                &name,
+                blacklist,
+                no_ext_filter,
+                normalized_os,
+                effective_arch.as_deref(),
+            )
         })
         .collect()
+}
+
+/// True when `name` survives the platform-independent filters.
+fn passes_static_filters(name: &str, blacklist: &[String], no_ext_filter: bool) -> bool {
+    (no_ext_filter || is_allowed_by_extension(name)) && !is_blacklisted(name, blacklist)
+}
+
+/// True when `name` contains any blacklist entry. Entries are matched
+/// verbatim against the lowercased name (callers lowercase entries).
+fn is_blacklisted(name: &str, blacklist: &[String]) -> bool {
+    blacklist.iter().any(|b| name.contains(b))
+}
+
+/// True when `name` survives all filters and names the target platform.
+fn is_candidate(
+    name: &str,
+    blacklist: &[String],
+    no_ext_filter: bool,
+    os: &str,
+    arch: Option<&str>,
+) -> bool {
+    passes_static_filters(name, blacklist, no_ext_filter)
+        && os_matches(name, os)
+        && arch_matches(name, os, arch)
+}
+
+/// True when `name` names `os` for the candidate filter (see [`OS_ALIASES`]).
+/// Windows names must not mention `darwin` — the windows aliases include
+/// `win`, a substring of `darwin`. Otherwise the filter stays existential: it
+/// keeps e.g. a name mentioning both `macos` and `windows`, which
+/// [`os_excludes`] zeroes when scoring.
+fn os_matches(name: &str, os: &str) -> bool {
+    vocab(OS_ALIASES, os).iter().any(|t| name.contains(t))
+        && (os != "windows" || !os_excludes(name, os))
+}
+
+/// True when `name` matches the requested arch for the candidate filter:
+/// explicit arch tokens, else the target OS's default arch when the name
+/// declares no arch at all (e.g. `app-linux.tar.gz` is linux/x86_64).
+fn arch_matches(name: &str, os: &str, arch: Option<&str>) -> bool {
+    let Some(arch) = arch else {
+        return false;
+    };
+    has_arch_token(name, arch, os)
+        || (!has_explicit_arch_pattern(name) && default_arch_for_os(os) == Some(arch))
+}
+
+/// True when `name` names `arch` with any arch token.
+fn has_arch_token(name: &str, arch: &str, os: &str) -> bool {
+    vocab(ARCH_ALIASES, arch)
+        .iter()
+        .any(|t| token_names_arch(name, t, os))
+        || has_windows_word_token(name, arch, os)
+}
+
+/// True when `token` names `arch` in `name` for target `os`. Windows
+/// word-size tokens name `x86_64` but appear only in windows names, so they
+/// count for windows targets only — `app-darwin-win64` must not read as
+/// x86_64 elsewhere (the scorer differs; see [`WINDOWS_X86_64_TOKENS`]).
+fn token_names_arch(name: &str, token: &str, os: &str) -> bool {
+    name.contains(token) && (os == "windows" || !WINDOWS_X86_64_TOKENS.contains(&token))
+}
+
+/// True when `name` names `arch` with a windows word-size token (`win64`,
+/// `win32`) — `x86_64` targets on windows only.
+fn has_windows_word_token(name: &str, arch: &str, os: &str) -> bool {
+    arch == "x86_64" && os == "windows" && WINDOWS_X86_64_TOKENS.iter().any(|t| name.contains(t))
 }
 
 #[cfg(test)]
@@ -2211,5 +2319,269 @@ mod tests {
         assert!(!has_explicit_arch_pattern("tool-v1-harmony-linux.tar.gz"));
         assert!(!has_explicit_arch_pattern("tool-v1-warm-linux.tar.gz"));
         assert!(!has_explicit_arch_pattern("app-linux-musl.tar.gz"));
+    }
+
+    // --------------- Characterization tests ---------------
+    //
+    // Lock in the current behavior of `has_explicit_arch_pattern`,
+    // `calculate_match_score`, and `collect_matches` — including their known
+    // asymmetries — before the complexity refactor. The refactor must keep
+    // these green without edits.
+
+    fn asset(name: &str) -> Asset {
+        Asset {
+            name: name.to_string(),
+            browser_download_url: format!("https://example.com/{name}"),
+            size: 1024,
+        }
+    }
+
+    fn collect_names_with(
+        names: &[&str],
+        blacklist: &[String],
+        os: &str,
+        arch: Option<&str>,
+        no_ext_filter: bool,
+    ) -> Vec<String> {
+        let assets: Vec<Asset> = names.iter().map(|n| asset(n)).collect();
+        collect_matches(
+            &assets,
+            blacklist,
+            os,
+            &arch.map(|a| a.to_string()),
+            no_ext_filter,
+        )
+        .into_iter()
+        .map(|a| a.name.clone())
+        .collect()
+    }
+
+    fn collect_names(names: &[&str], os: &str, arch: &str) -> Vec<String> {
+        collect_names_with(names, &[], os, Some(arch), false)
+    }
+
+    #[test]
+    fn characterize_has_explicit_arch_pattern_tokens() {
+        for name in [
+            "app-x86_64.tar.gz",
+            "app-amd64.tar.gz",
+            "app-x64.tar.gz",
+            "app-aarch64.tar.gz",
+            "app-arm64.tar.gz",
+            "app-loong64.tar.gz",
+            "app-loongarch64.tar.gz",
+            "app-i686.tar.gz",
+            "app-i386.tar.gz",
+            "app-x86.tar.gz",
+            "app-armhf.tar.gz",
+            "app-armv7.tar.gz",
+            "app-riscv64.tar.gz",
+            "app-riscv32.tar.gz",
+            "app-ppc64le.tar.gz",
+            "app-ppc64.tar.gz",
+            "app-powerpc.tar.gz",
+            "app-s390x.tar.gz",
+            "app-mips.tar.gz",
+            "app-win64.zip",
+            "app-win32.zip",
+            "app-gnueabihf.tar.gz",
+            "app-musleabihf.tar.gz",
+            "APP-X86_64.TAR.GZ",
+        ] {
+            assert!(has_explicit_arch_pattern(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn characterize_has_explicit_arch_pattern_absent() {
+        for name in [
+            "app-windows.zip",
+            "app-darwin.tar.gz",
+            "app-linux.tar.gz",
+            "app-musl.tar.gz",
+            "tool-v1-harmony-linux.tar.gz",
+        ] {
+            assert!(!has_explicit_arch_pattern(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn characterize_match_score_os_and_arch() {
+        // exact os token beats an os alias
+        assert_eq!(
+            calculate_match_score("app-windows.zip", "windows", "x86_64"),
+            2
+        );
+        assert_eq!(calculate_match_score("app-win.zip", "windows", "x86_64"), 1);
+        // cross-OS exclusion short-circuits to 0 before any scoring
+        assert_eq!(
+            calculate_match_score("app-x86_64-apple-darwin.tar.gz", "windows", "x86_64"),
+            0
+        );
+        // ... but the same name still collects its arch point for other targets
+        assert_eq!(
+            calculate_match_score("app-x86_64-apple-darwin.tar.gz", "linux", "x86_64"),
+            1
+        );
+    }
+
+    #[test]
+    fn characterize_match_score_musl_bonus_and_gnu_neutrality() {
+        // musl gets +1 on linux; glibc is never penalized (gnu == neutral)
+        assert_eq!(
+            calculate_match_score("app-x86_64-linux-musl.tar.gz", "linux", "x86_64"),
+            4
+        );
+        assert_eq!(
+            calculate_match_score("app-x86_64-linux-gnu.tar.gz", "linux", "x86_64"),
+            3
+        );
+        assert_eq!(
+            calculate_match_score("app-x86_64-linux.tar.gz", "linux", "x86_64"),
+            3
+        );
+        // the bonus is linux-only and unconditional (no os/arch match needed)
+        assert_eq!(calculate_match_score("app-musl.zip", "linux", "x86_64"), 1);
+        assert_eq!(
+            calculate_match_score("app-x86_64-musl.zip", "macos", "x86_64"),
+            1
+        );
+    }
+
+    #[test]
+    fn characterize_match_score_win64_win32_tokens() {
+        // `win64` scores as both os and arch on windows, `win32` only as os
+        assert_eq!(
+            calculate_match_score("app-win64.zip", "windows", "x86_64"),
+            2
+        );
+        assert_eq!(
+            calculate_match_score("app-win32.zip", "windows", "x86_64"),
+            1
+        );
+        // `win64` still scores as x86_64 even off windows targets
+        // (collect_matches gates it behind windows — documented drift)
+        assert_eq!(
+            calculate_match_score("app-darwin-win64.tar.gz", "macos", "x86_64"),
+            2
+        );
+    }
+
+    #[test]
+    fn characterize_match_score_macos_windows_exclusion() {
+        // the scorer zeroes names mentioning windows for macos targets
+        assert_eq!(
+            calculate_match_score("app-macos-windows-x86_64.tar.gz", "macos", "x86_64"),
+            0
+        );
+    }
+
+    #[test]
+    fn characterize_collect_matches_default_arch_fallback() {
+        // no explicit arch in the name → the OS default arch applies
+        assert_eq!(
+            collect_names(&["app-linux.tar.gz"], "linux", "x86_64"),
+            ["app-linux.tar.gz"]
+        );
+        assert_eq!(
+            collect_names(&["app-windows.zip"], "windows", "x86_64"),
+            ["app-windows.zip"]
+        );
+        // macos defaults to aarch64, so an arch-less name is not an x86_64 match
+        assert!(collect_names(&["app-darwin.tar.gz"], "macos", "x86_64").is_empty());
+        assert_eq!(
+            collect_names(&["app-darwin.tar.gz"], "macos", "aarch64"),
+            ["app-darwin.tar.gz"]
+        );
+        // ... and linux never falls back to loong64
+        assert!(collect_names(&["app-linux.tar.gz"], "linux", "loong64").is_empty());
+        assert_eq!(
+            collect_names(&["app-loongarch64-linux.tar.gz"], "linux", "loong64"),
+            ["app-loongarch64-linux.tar.gz"]
+        );
+        // no requested arch → nothing matches
+        assert!(collect_names_with(&["app-linux.tar.gz"], &[], "linux", None, false).is_empty());
+    }
+
+    #[test]
+    fn characterize_collect_matches_bare_arm_and_eabi() {
+        // 32-bit ARM (bare `arm` token / EABI triples) must not fall into the
+        // default-arch fallback, for any target arch
+        let arm = [
+            "fd-v10.4.2-arm-unknown-linux-gnueabihf.tar.gz",
+            "fd-v10.4.2-arm-unknown-linux-musleabihf.tar.gz",
+            "tool-1.2.3-arm-linux.tar.gz",
+        ];
+        assert!(collect_names(&arm, "linux", "x86_64").is_empty());
+        assert!(collect_names(&arm, "linux", "aarch64").is_empty());
+    }
+
+    #[test]
+    fn characterize_collect_matches_win64_win32_gating() {
+        // win64/win32 count as x86_64 only for windows targets
+        assert_eq!(
+            collect_names(&["app-win64.zip"], "windows", "x86_64"),
+            ["app-win64.zip"]
+        );
+        assert_eq!(
+            collect_names(&["app-win32.zip"], "windows", "x86_64"),
+            ["app-win32.zip"]
+        );
+        // off windows the same tokens are dropped even though the scorer
+        // would still read `win64` as x86_64 (documented drift)
+        assert!(collect_names(&["app-darwin-win64.tar.gz"], "macos", "x86_64").is_empty());
+    }
+
+    #[test]
+    fn characterize_collect_matches_windows_darwin_exclusion() {
+        // `darwin` contains `win`, so the windows os aliases match it — the
+        // darwin exclusion is what keeps such names out of windows results
+        assert!(collect_names(&["app-x86_64-apple-darwin.tar.gz"], "windows", "x86_64").is_empty());
+    }
+
+    #[test]
+    fn characterize_collect_matches_macos_has_no_windows_exclusion() {
+        // drift vs calculate_match_score (which zeroes this name): the macos
+        // filter keeps any darwin/macos name regardless of a windows mention
+        assert_eq!(
+            collect_names(&["app-macos-windows-x86_64.tar.gz"], "macos", "x86_64"),
+            ["app-macos-windows-x86_64.tar.gz"]
+        );
+    }
+
+    #[test]
+    fn characterize_collect_matches_blacklist_and_extension() {
+        let names = ["app-linux-x86_64-musl.tar.gz", "app-linux-x86_64.dmg"];
+        // .dmg is not an allowed extension by default
+        assert_eq!(
+            collect_names(&names, "linux", "x86_64"),
+            ["app-linux-x86_64-musl.tar.gz"]
+        );
+        // ... but is kept with the extension filter off
+        assert_eq!(
+            collect_names_with(&names, &[], "linux", Some("x86_64"), true),
+            names
+        );
+        // blacklist entries are matched verbatim against the lowercased name
+        // (callers lowercase entries upstream), so only the lowercase form drops
+        let blacklist = vec!["musl".to_string()];
+        assert_eq!(
+            collect_names_with(&names, &blacklist, "linux", Some("x86_64"), true),
+            ["app-linux-x86_64.dmg"]
+        );
+        let blacklist = vec!["MUSL".to_string()];
+        assert_eq!(
+            collect_names_with(&names, &blacklist, "linux", Some("x86_64"), true),
+            names
+        );
+    }
+
+    #[test]
+    fn characterize_collect_matches_unsupported_os_or_arch() {
+        // unknown os matches nothing
+        assert!(collect_names(&["app-freebsd-x86_64.tar.gz"], "freebsd", "x86_64").is_empty());
+        // neither does an arch outside x86_64/aarch64/loong64, even when the
+        // name carries that exact token
+        assert!(collect_names(&["app-riscv64-linux.tar.gz"], "linux", "riscv64").is_empty());
     }
 }
