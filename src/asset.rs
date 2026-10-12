@@ -2,6 +2,7 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     io::{self, IsTerminal, Write},
+    sync::LazyLock,
 };
 
 use anyhow::{Context, Result, bail};
@@ -52,9 +53,7 @@ fn normalize_platform_identifier(platform: &str) -> (String, Option<String>) {
     (normalized.clone(), None)
 }
 
-use std::sync::LazyLock;
-
-#[allow(dead_code)]
+#[cfg(test)]
 fn infer_architecture_from_platform(platform: &str) -> Option<String> {
     let normalized = platform.to_lowercase();
     PLATFORM_ALIASES
