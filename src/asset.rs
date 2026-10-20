@@ -272,6 +272,20 @@ fn is_allowed_by_extension(name: &str) -> bool {
     }
 }
 
+/// Platform match score of `name` for the target platform.
+///
+/// 2 points for the exact OS token, 1 for an OS alias, 1 for the target arch
+/// and 1 for a musl build on linux. Zero means the name names no platform at
+/// all. Shared with the archive-entry lookup in `src/extract.rs`.
+pub fn platform_score(name: &str, target_os: &str, target_arch: &str) -> i32 {
+    calculate_match_score(name, target_os, target_arch)
+}
+
+/// True when `name` names the target OS (see `OS_ALIASES`).
+pub fn names_os(name: &str, target_os: &str) -> bool {
+    os_score(&name.to_lowercase(), target_os) > 0
+}
+
 fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
     let name = asset_name.to_lowercase();
 

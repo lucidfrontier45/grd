@@ -289,7 +289,7 @@ repository in `~/.grd/state.toml`:
 - `list-platform`: Display supported OS/architecture combinations
 - `--list`: List available releases
 - `--destination`: Destination directory (default: current directory)
-- `--bin-name`: Select which executable to extract from the archive (default: repo basename). It also names the installed file unless `--rename` is given.
+- `--bin-name`: The name of the binary to install (default: repo basename). It names the installed file — `app-bin`, or `app-bin.exe` on Windows — unless `--rename` is given, and it selects the archive entry: an exact match wins, while a platform-suffixed entry matches too (`app-bin` finds `app-bin-linux-x64` or `app-bin-windows-x64.exe`), with the best platform match winning when the archive holds several. A release that ships the binary directly, without an archive, is named after it as well.
 - `--rename`: Install the extracted executable under a different filename. Does not change which file is picked from the archive, so `grd owner/prj --bin-name exe1 --rename exe2` extracts `exe1` and writes `exe2`. Also applies with `--no-decompress`.
 - `--select`: Force manual selection from filtered (OS/arch-matched) candidates
 - `--select-all`: Force manual selection from all available assets (ignores OS/arch filter)

@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File},
-    io::{self, Read, Seek},
+    io::{self, BufRead, Read, Seek},
     path::Path,
 };
 
@@ -10,9 +10,61 @@ use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
 use crate::{
+    asset,
     download::DownloadSource,
-    naming::{is_windows, rename_output, strip_exe_suffix},
+    naming::{Platform, base_name, installed_name, is_windows, rename_output, strip_exe_suffix},
 };
+
+/// A download source that can be read more than once.
+///
+/// The platform-suffix lookup needs a second pass over a tar archive when the
+/// binary is not found by an exact match, so the bytes (or the temp file) are
+/// kept around instead of being consumed by the first pass.
+enum ArchiveSource {
+    Memory(Vec<u8>),
+    Disk(NamedTempFile),
+}
+
+impl ArchiveSource {
+    fn new(source: DownloadSource) -> Self {
+        match source {
+            DownloadSource::Memory(bytes) => Self::Memory(bytes),
+            DownloadSource::Disk(file) => Self::Disk(file),
+        }
+    }
+
+    /// A fresh reader over the source bytes.
+    fn reader(&self) -> Result<Box<dyn Read + '_>> {
+        Ok(match self {
+            Self::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
+            Self::Disk(file) => Box::new(File::open(file.path())?),
+        })
+    }
+
+    /// A fresh buffered reader over the source bytes.
+    fn buf_reader(&self) -> Result<Box<dyn BufRead + '_>> {
+        Ok(match self {
+            Self::Memory(bytes) => Box::new(io::BufReader::new(io::Cursor::new(bytes))),
+            Self::Disk(file) => Box::new(io::BufReader::new(File::open(file.path())?)),
+        })
+    }
+
+    /// A fresh seekable reader over the source bytes.
+    fn read_seek(&self) -> Result<Box<dyn ReadSeek + '_>> {
+        Ok(match self {
+            Self::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
+            Self::Disk(file) => Box::new(File::open(file.path())?),
+        })
+    }
+}
+
+/// An archive entry that matched the lookup name by a platform suffix.
+struct SuffixCandidate {
+    /// Path of the entry inside the archive.
+    path: String,
+    /// Platform match score of the entry's basename.
+    score: i32,
+}
 
 /// True when `entry_path` refers to `lookup_name`.
 ///
@@ -41,24 +93,75 @@ fn is_entry_match(entry_path: &str, lookup_name: &str, os: &str) -> bool {
     is_windows(os) && is_lookup_match(strip_exe_suffix(entry_path), strip_exe_suffix(lookup_name))
 }
 
-/// Filename an extracted entry is written under: an explicit `--rename` wins,
-/// otherwise the entry keeps its own filename.
-fn entry_out_name(entry_path: &str, rename: Option<&str>, os: &str) -> String {
-    if let Some(rename) = rename {
-        return rename_output(rename, os);
+/// True when `entry_path` is a platform-suffixed candidate for `lookup_name`.
+///
+/// The entry's basename must start with the lookup basename and carry more
+/// than it, so `app-bin` matches `app-bin-linux-x64`. The suffix must either
+/// name the target OS or be tag-shaped (`-`/`_` separated), which keeps `pi`
+/// from matching an unrelated `pilot`.
+///
+/// On a Windows target the `.exe` suffix is ignored on both sides, like in
+/// the exact-match rule, so `app-bin.exe` finds `app-bin-windows-x64.exe`.
+fn is_suffix_candidate(entry_path: &str, lookup_name: &str, os: &str) -> bool {
+    let entry_base = base_name(entry_path);
+    let lookup_base = base_name(lookup_name);
+    let (entry_stem, lookup_stem) = if is_windows(os) {
+        (strip_exe_suffix(entry_base), strip_exe_suffix(lookup_base))
+    } else {
+        (entry_base, lookup_base)
+    };
+    if lookup_stem.is_empty() || !entry_stem.starts_with(lookup_stem) {
+        return false;
     }
-    Path::new(entry_path).file_name().map_or_else(
-        || entry_path.to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
+    let suffix = &entry_stem[lookup_stem.len()..];
+    if suffix.is_empty() {
+        // An exact basename is the exact-match rule's business.
+        return false;
+    }
+    if asset::names_os(entry_base, os) {
+        return true;
+    }
+    suffix.starts_with('-') || suffix.starts_with('_')
+}
+
+/// The best platform-suffixed candidate for the target platform.
+///
+/// `Ok(None)` when the archive holds no candidate at all. An error when
+/// several candidates share the best score: the archive holds more than one
+/// plausible binary and guessing would be worse than asking.
+fn select_suffix_candidate<'a>(
+    candidates: &'a [SuffixCandidate],
+    lookup_name: &str,
+) -> Result<Option<&'a SuffixCandidate>> {
+    let Some(best) = candidates.iter().max_by_key(|candidate| candidate.score) else {
+        return Ok(None);
+    };
+    let tied: Vec<&SuffixCandidate> = candidates
+        .iter()
+        .filter(|candidate| candidate.score == best.score)
+        .collect();
+    if tied.len() > 1 {
+        let listing = tied
+            .iter()
+            .map(|candidate| format!("  - {}", candidate.path))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!(
+            "Multiple executables match '{}':\n{}\nPass a more specific --bin-name.",
+            lookup_name,
+            listing
+        );
+    }
+    Ok(Some(best))
 }
 
 /// Extract a downloaded asset into `dest_dir` and return the written filename.
 ///
-/// `lookup_name` selects which archive entry is extracted. `rename`, when set,
-/// overrides the name written to disk (`--rename`); otherwise the matched
-/// entry's own filename is kept. `os` is the selected target platform and only
-/// drives the Windows `.exe` lookup candidate and the `--rename` suffix.
+/// `lookup_name` selects which archive entry is extracted: an exact match
+/// wins, otherwise a platform-suffixed entry (`app-bin-linux-x64` for
+/// `app-bin`) is picked by platform score. `rename`, when set, overrides
+/// the name written to disk (`--rename`); otherwise the lookup name decides
+/// it. `platform` is the selected target platform.
 pub fn extract_and_save(
     source: DownloadSource,
     filename: &str,
@@ -66,86 +169,126 @@ pub fn extract_and_save(
     rename: Option<&str>,
     dest_dir: &Path,
     no_decompress: bool,
-    os: &str,
+    platform: Platform<'_>,
 ) -> Result<String> {
     fs::create_dir_all(dest_dir).context("Failed to create destination directory")?;
 
+    let source = ArchiveSource::new(source);
+    let os = platform.os;
+
     if no_decompress {
         let out_name = rename.map_or_else(|| filename.to_string(), |r| rename_output(r, os));
-        save_raw(source, &out_name, dest_dir)?;
+        save_raw(&source, &out_name, dest_dir)?;
         println!("Saved raw asset to {:?}", dest_dir.join(&out_name));
         return Ok(out_name);
     }
 
     if filename.ends_with(".zip") {
-        extract_zip(source, lookup_name, rename, dest_dir, os)
+        extract_zip(&source, lookup_name, rename, dest_dir, platform)
     } else if filename.ends_with(".tar.xz") {
-        extract_tar_xz(source, lookup_name, rename, dest_dir, os)
+        extract_tar_xz(&source, lookup_name, rename, dest_dir, platform)
     } else if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-        extract_tar_gz(source, lookup_name, rename, dest_dir, os)
+        extract_tar_gz(&source, lookup_name, rename, dest_dir, platform)
     } else {
-        // Not an archive (e.g. a bare `.exe`): write it under its own name.
-        let out_name = rename.map_or_else(|| filename.to_string(), |r| rename_output(r, os));
-        save_raw(source, &out_name, dest_dir)?;
+        // Not an archive (e.g. a bare `.exe`): the asset is the binary itself.
+        let out_name = installed_name(rename, lookup_name, os);
+        save_raw(&source, &out_name, dest_dir)?;
         Ok(out_name)
     }
 }
 
 fn extract_zip(
-    source: DownloadSource,
+    source: &ArchiveSource,
     lookup_name: &str,
     rename: Option<&str>,
     dest_dir: &Path,
-    os: &str,
+    platform: Platform<'_>,
 ) -> Result<String> {
-    let rdr: Box<dyn ReadSeek> = match source {
-        DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
-        DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
-    };
-    let mut archive = ZipArchive::new(rdr).context("Failed to parse ZIP archive")?;
+    let (os, arch) = (platform.os, platform.arch);
+    let out_name = installed_name(rename, lookup_name, os);
+    let mut archive =
+        ZipArchive::new(source.read_seek()?).context("Failed to parse ZIP archive")?;
+    let mut candidates: Vec<SuffixCandidate> = Vec::new();
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).context("Failed to read ZIP entry")?;
         if file.is_dir() {
             continue;
         }
-        if is_entry_match(file.name(), lookup_name, os) {
-            let out_name = entry_out_name(file.name(), rename, os);
-            let out_path = dest_dir.join(&out_name);
-            let mut outfile = File::create(&out_path).context("Failed to create output file")?;
-            io::copy(&mut file, &mut outfile).context("Failed to write extracted file")?;
-            #[cfg(unix)]
-            set_permissions(&out_path)?;
+        let name = file.name().to_string();
+        if is_entry_match(&name, lookup_name, os) {
+            write_zip_entry(&mut file, dest_dir, &out_name)?;
             return Ok(out_name);
         }
+        if is_suffix_candidate(&name, lookup_name, os) {
+            let score = asset::platform_score(base_name(&name), os, arch);
+            candidates.push(SuffixCandidate { path: name, score });
+        }
+    }
+
+    let Some(candidate) = select_suffix_candidate(&candidates, lookup_name)? else {
+        bail!("Executable '{}' not found in archive", lookup_name);
+    };
+
+    // The suffix match needs a second look: re-open the winning entry.
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).context("Failed to read ZIP entry")?;
+        if file.is_dir() || file.name() != candidate.path {
+            continue;
+        }
+        write_zip_entry(&mut file, dest_dir, &out_name)?;
+        return Ok(out_name);
     }
     bail!("Executable '{}' not found in archive", lookup_name)
 }
 
 fn extract_tar_gz(
-    source: DownloadSource,
+    source: &ArchiveSource,
     lookup_name: &str,
     rename: Option<&str>,
     dest_dir: &Path,
-    os: &str,
+    platform: Platform<'_>,
 ) -> Result<String> {
-    let rdr: Box<dyn Read> = match source {
-        DownloadSource::Memory(bytes) => Box::new(io::Cursor::new(bytes)),
-        DownloadSource::Disk(temp_file) => Box::new(File::open(temp_file.path())?),
+    let (os, arch) = (platform.os, platform.arch);
+    let out_name = installed_name(rename, lookup_name, os);
+    let mut candidates: Vec<SuffixCandidate> = Vec::new();
+
+    {
+        let rdr = source.reader()?;
+        let mut archive = tar::Archive::new(GzDecoder::new(rdr));
+        for entry in archive.entries().context("Failed to read tar archive")? {
+            let file = entry.context("Failed to read tar entry")?;
+            let path = file.path()?.to_path_buf();
+            if file.header().entry_type().is_dir() {
+                continue;
+            }
+            let path = path.to_string_lossy().into_owned();
+            if is_entry_match(&path, lookup_name, os) {
+                write_tar_entry(file, dest_dir, &out_name)?;
+                return Ok(out_name);
+            }
+            if is_suffix_candidate(&path, lookup_name, os) {
+                let score = asset::platform_score(base_name(&path), os, arch);
+                candidates.push(SuffixCandidate { path, score });
+            }
+        }
+    }
+
+    let Some(candidate) = select_suffix_candidate(&candidates, lookup_name)? else {
+        bail!("Executable '{}' not found in archive", lookup_name);
     };
+
+    // The suffix match needs a second pass over the archive.
+    let rdr = source.reader()?;
     let mut archive = tar::Archive::new(GzDecoder::new(rdr));
     for entry in archive.entries().context("Failed to read tar archive")? {
-        let mut file = entry.context("Failed to read tar entry")?;
+        let file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
         if file.header().entry_type().is_dir() {
             continue;
         }
-        if is_entry_match(&path.to_string_lossy(), lookup_name, os) {
-            let out_name = entry_out_name(&path.to_string_lossy(), rename, os);
-            let out_path = dest_dir.join(&out_name);
-            file.unpack(&out_path)
-                .context("Failed to unpack tar entry")?;
-            #[cfg(unix)]
-            set_permissions(&out_path)?;
+        if path.to_string_lossy().as_ref() == candidate.path {
+            write_tar_entry(file, dest_dir, &out_name)?;
             return Ok(out_name);
         }
     }
@@ -153,58 +296,105 @@ fn extract_tar_gz(
 }
 
 fn extract_tar_xz(
-    source: DownloadSource,
+    source: &ArchiveSource,
     lookup_name: &str,
     rename: Option<&str>,
     dest_dir: &Path,
-    os: &str,
+    platform: Platform<'_>,
 ) -> Result<String> {
-    // Stream-decompress xz into a temp file rather than buffering the entire
-    // decompressed archive in memory, so the user's --memory-limit setting is
-    // respected for .tar.xz payloads.
-    let mut compressed: Box<dyn io::BufRead> = match source {
-        DownloadSource::Memory(bytes) => Box::new(io::BufReader::new(io::Cursor::new(bytes))),
-        DownloadSource::Disk(temp_file) => {
-            Box::new(io::BufReader::new(File::open(temp_file.path())?))
+    let (os, arch) = (platform.os, platform.arch);
+    let out_name = installed_name(rename, lookup_name, os);
+    let mut candidates: Vec<SuffixCandidate> = Vec::new();
+
+    {
+        let decompressed = xz_temp_file(source)?;
+        let mut archive = tar::Archive::new(decompressed.reopen()?);
+        for entry in archive.entries().context("Failed to read tar archive")? {
+            let file = entry.context("Failed to read tar entry")?;
+            let path = file.path()?.to_path_buf();
+            if file.header().entry_type().is_dir() {
+                continue;
+            }
+            let path = path.to_string_lossy().into_owned();
+            if is_entry_match(&path, lookup_name, os) {
+                write_tar_entry(file, dest_dir, &out_name)?;
+                return Ok(out_name);
+            }
+            if is_suffix_candidate(&path, lookup_name, os) {
+                let score = asset::platform_score(base_name(&path), os, arch);
+                candidates.push(SuffixCandidate { path, score });
+            }
         }
+    }
+
+    let Some(candidate) = select_suffix_candidate(&candidates, lookup_name)? else {
+        bail!("Executable '{}' not found in archive", lookup_name);
     };
 
-    let mut decompressed =
-        NamedTempFile::new().context("Failed to create temp file for xz decompression")?;
-    lzma_rs::xz_decompress(&mut compressed, decompressed.as_file_mut())
-        .context("Failed to decompress xz archive")?;
-    drop(compressed);
-
-    let tar_file = decompressed
-        .reopen()
-        .context("Failed to reopen decompressed tar for reading")?;
-    let mut archive = tar::Archive::new(tar_file);
+    // The suffix match needs a second pass over the archive.
+    let decompressed = xz_temp_file(source)?;
+    let mut archive = tar::Archive::new(decompressed.reopen()?);
     for entry in archive.entries().context("Failed to read tar archive")? {
-        let mut file = entry.context("Failed to read tar entry")?;
+        let file = entry.context("Failed to read tar entry")?;
         let path = file.path()?.to_path_buf();
         if file.header().entry_type().is_dir() {
             continue;
         }
-        if is_entry_match(&path.to_string_lossy(), lookup_name, os) {
-            let out_name = entry_out_name(&path.to_string_lossy(), rename, os);
-            let out_path = dest_dir.join(&out_name);
-            file.unpack(&out_path)
-                .context("Failed to unpack tar entry")?;
-            #[cfg(unix)]
-            set_permissions(&out_path)?;
+        if path.to_string_lossy().as_ref() == candidate.path {
+            write_tar_entry(file, dest_dir, &out_name)?;
             return Ok(out_name);
         }
     }
     bail!("Executable '{}' not found in archive", lookup_name)
 }
 
-fn save_raw(source: DownloadSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
+/// Decompress the xz payload into a temporary file, so the archive can be
+/// read without holding it in memory.
+fn xz_temp_file(source: &ArchiveSource) -> Result<NamedTempFile> {
+    let mut compressed = source.buf_reader()?;
+    let mut decompressed =
+        NamedTempFile::new().context("Failed to create temp file for xz decompression")?;
+    lzma_rs::xz_decompress(&mut compressed, decompressed.as_file_mut())
+        .context("Failed to decompress xz archive")?;
+    drop(compressed);
+    Ok(decompressed)
+}
+
+/// Write a ZIP entry to `dest_dir` under `out_name`.
+fn write_zip_entry<R: Read + ?Sized>(
+    file: &mut zip::read::ZipFile<'_, R>,
+    dest_dir: &Path,
+    out_name: &str,
+) -> Result<()> {
+    let out_path = dest_dir.join(out_name);
+    let mut outfile = File::create(&out_path).context("Failed to create output file")?;
+    io::copy(file, &mut outfile).context("Failed to write extracted file")?;
+    #[cfg(unix)]
+    set_permissions(&out_path)?;
+    Ok(())
+}
+
+/// Write a tar entry to `dest_dir` under `out_name`.
+fn write_tar_entry<R: Read>(
+    mut file: tar::Entry<'_, R>,
+    dest_dir: &Path,
+    out_name: &str,
+) -> Result<()> {
+    let out_path = dest_dir.join(out_name);
+    file.unpack(&out_path)
+        .context("Failed to unpack tar entry")?;
+    #[cfg(unix)]
+    set_permissions(&out_path)?;
+    Ok(())
+}
+
+fn save_raw(source: &ArchiveSource, target_bin_name: &str, dest_dir: &Path) -> Result<()> {
     let out_path = dest_dir.join(target_bin_name);
     match source {
-        DownloadSource::Memory(bytes) => {
+        ArchiveSource::Memory(bytes) => {
             fs::write(&out_path, bytes).context("Failed to write file")?;
         }
-        DownloadSource::Disk(temp_file) => {
+        ArchiveSource::Disk(temp_file) => {
             fs::copy(temp_file.path(), &out_path).context("Failed to copy file")?;
         }
     }
@@ -246,7 +436,7 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
 
-        let result = save_raw(source, "test.bin", dest_dir);
+        let result = save_raw(&ArchiveSource::new(source), "test.bin", dest_dir);
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("test.bin");
@@ -267,7 +457,7 @@ mod tests {
         temp_file.write_all(b"test content").unwrap();
         let source = DownloadSource::Disk(temp_file);
 
-        let result = save_raw(source, "test.bin", dest_dir);
+        let result = save_raw(&ArchiveSource::new(source), "test.bin", dest_dir);
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("test.bin");
@@ -302,7 +492,13 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
+        let result = extract_tar_xz(
+            &ArchiveSource::new(source),
+            "my-app",
+            None,
+            dest,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(
             result.is_ok(),
             "extract_tar_xz failed: {:?}",
@@ -340,7 +536,13 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(compressed);
 
-        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
+        let result = extract_tar_xz(
+            &ArchiveSource::new(source),
+            "my-app",
+            None,
+            dest,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(result.is_err());
     }
 
@@ -353,7 +555,13 @@ mod tests {
         let corrupted_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00];
         let source = DownloadSource::Memory(corrupted_data);
 
-        let result = extract_tar_xz(source, "my-app", None, dest, "linux");
+        let result = extract_tar_xz(
+            &ArchiveSource::new(source),
+            "my-app",
+            None,
+            dest,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -371,7 +579,15 @@ mod tests {
         let dest = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3]);
 
-        let result = extract_and_save(source, "foo.tar.xz", "app", None, dest, true, "linux");
+        let result = extract_and_save(
+            source,
+            "foo.tar.xz",
+            "app",
+            None,
+            dest,
+            true,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(result.is_ok());
 
         let file_path = dest.join("foo.tar.xz");
@@ -386,7 +602,15 @@ mod tests {
         let dest_dir = temp_dir.path();
         let source = DownloadSource::Memory(vec![1, 2, 3, 4, 5]);
 
-        let result = extract_and_save(source, "test.bin", "app", None, dest_dir, true, "linux");
+        let result = extract_and_save(
+            source,
+            "test.bin",
+            "app",
+            None,
+            dest_dir,
+            true,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(result.is_ok());
 
         let file_path = dest_dir.join("test.bin");
@@ -408,7 +632,7 @@ mod tests {
             Some("app"),
             dest_dir,
             false,
-            "windows",
+            Platform::new("windows", "x86_64"),
         )
         .unwrap();
         assert_eq!(written, "app.exe");
@@ -430,7 +654,7 @@ mod tests {
             Some("app"),
             dest_dir,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         )
         .unwrap();
         assert_eq!(written, "app");
@@ -593,7 +817,16 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+        let written = extract_and_save(
+            source,
+            "a.zip",
+            "a",
+            None,
+            dest,
+            false,
+            Platform::new("windows", "x86_64"),
+        )
+        .unwrap();
 
         assert_eq!(written, "a.exe");
         assert_eq!(fs::read(dest.join("a.exe")).unwrap(), b"binary-bytes");
@@ -610,15 +843,23 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let result = extract_and_save(source, "a.zip", "a", None, dest, false, "linux");
+        let result = extract_and_save(
+            source,
+            "a.zip",
+            "a",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        );
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_extract_zip_keeps_entry_name_without_exe_on_windows() {
+    fn test_extract_zip_names_the_output_after_the_lookup_name() {
         use tempfile::TempDir;
 
-        // Entry has no `.exe`: it must be written under its own name, not renamed.
+        // The entry has no `.exe`, but a Windows target always gets one.
         let source = DownloadSource::Memory(zip_with_entries(&[
             ("a-0.1/", b""),
             ("a-0.1/a", b"binary-bytes"),
@@ -626,11 +867,269 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let dest = temp_dir.path();
-        let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+        let written = extract_and_save(
+            source,
+            "a.zip",
+            "a",
+            None,
+            dest,
+            false,
+            Platform::new("windows", "x86_64"),
+        )
+        .unwrap();
 
-        assert_eq!(written, "a");
-        assert!(dest.join("a").exists());
-        assert!(!dest.join("a.exe").exists());
+        assert_eq!(written, "a.exe");
+        assert!(dest.join("a.exe").exists());
+    }
+
+    /// A platform-suffixed entry is selected by the lookup name and written
+    /// under it: `--bin-name app-bin` finds `app-bin-linux-x64`.
+    #[test]
+    fn test_extract_tar_gz_matches_platform_suffix() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[
+            ("app-1.0/", b""),
+            ("app-1.0/app-bin-linux-x64", b"linux-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.tar.gz",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin");
+        assert_eq!(fs::read(dest.join("app-bin")).unwrap(), b"linux-bytes");
+    }
+
+    /// The same on a Windows target, where the entry carries `.exe`.
+    #[test]
+    fn test_extract_zip_matches_platform_suffix_on_windows() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("app-1.0/", b""),
+            ("app-1.0/app-bin-windows-x64.exe", b"windows-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.zip",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("windows", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin.exe");
+        assert_eq!(
+            fs::read(dest.join("app-bin.exe")).unwrap(),
+            b"windows-bytes"
+        );
+    }
+
+    /// An exact match wins over a platform-suffixed one.
+    #[test]
+    fn test_exact_match_wins_over_platform_suffix() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[
+            ("app-1.0/app-bin", b"exact-bytes"),
+            ("app-1.0/app-bin-linux-x64", b"suffix-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.tar.gz",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin");
+        assert_eq!(fs::read(dest.join("app-bin")).unwrap(), b"exact-bytes");
+    }
+
+    /// Among platform-suffixed candidates the best platform score wins.
+    #[test]
+    fn test_platform_suffix_picks_the_target_platform() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("app-1.0/app-bin-linux-x64", b"linux-bytes"),
+            ("app-1.0/app-bin-windows-x64.exe", b"windows-bytes"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.zip",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin");
+        assert_eq!(fs::read(dest.join("app-bin")).unwrap(), b"linux-bytes");
+    }
+
+    /// Two candidates with the same score are ambiguous: ask for a better name.
+    #[test]
+    fn test_platform_suffix_tie_is_an_error() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[
+            ("app-1.0/app-bin-linux-x64", b"one"),
+            ("app-1.0/app-bin-linux-x86_64", b"two"),
+        ]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(
+            source,
+            "app.zip",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Multiple executables"),
+            "error should report the ambiguity: {err}"
+        );
+        assert!(!dest.join("app-bin").exists());
+    }
+
+    /// A name that merely starts with the lookup name is not a candidate.
+    #[test]
+    fn test_platform_suffix_ignores_unrelated_names() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[("pi-1.0/pilot", b"junk")]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let result = extract_and_save(
+            source,
+            "pi.tar.gz",
+            "pi",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        );
+
+        assert!(result.is_err());
+        assert!(!dest.join("pi").exists());
+    }
+
+    /// A version tag after the lookup name still matches.
+    #[test]
+    fn test_platform_suffix_accepts_a_version_tag() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[(
+            "app-1.0/app-bin-v1.2.3",
+            b"tagged-bytes",
+        )]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.tar.gz",
+            "app-bin",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin");
+        assert_eq!(fs::read(dest.join("app-bin")).unwrap(), b"tagged-bytes");
+    }
+
+    /// On a Windows target the `.exe` suffix is ignored while matching, so
+    /// `--bin-name app-bin.exe` finds `app-bin-windows-x64.exe`.
+    #[test]
+    fn test_platform_suffix_ignores_the_exe_suffix_on_windows() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(zip_with_entries(&[(
+            "app-1.0/app-bin-windows-x64.exe",
+            b"windows-bytes",
+        )]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.zip",
+            "app-bin.exe",
+            None,
+            dest,
+            false,
+            Platform::new("windows", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app-bin.exe");
+        assert_eq!(
+            fs::read(dest.join("app-bin.exe")).unwrap(),
+            b"windows-bytes"
+        );
+    }
+
+    /// The default lookup (the repository basename) uses the same rule.
+    #[test]
+    fn test_default_lookup_matches_platform_suffix() {
+        use tempfile::TempDir;
+
+        let source = DownloadSource::Memory(tar_gz_with_entries(&[(
+            "app-1.0/app-bin-linux-x64",
+            b"linux-bytes",
+        )]));
+
+        let temp_dir = TempDir::new().unwrap();
+        let dest = temp_dir.path();
+        let written = extract_and_save(
+            source,
+            "app.tar.gz",
+            "app",
+            None,
+            dest,
+            false,
+            Platform::new("linux", "x86_64"),
+        )
+        .unwrap();
+
+        assert_eq!(written, "app");
+        assert_eq!(fs::read(dest.join("app")).unwrap(), b"linux-bytes");
     }
 
     #[test]
@@ -655,7 +1154,7 @@ mod tests {
             Some("pi-bolt"),
             dest,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(
             result.is_ok(),
@@ -687,7 +1186,7 @@ mod tests {
             Some("pi-bolt"),
             dest,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(
             result.is_ok(),
@@ -716,7 +1215,7 @@ mod tests {
             Some("pi-bolt"),
             dest,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(
             result.is_ok(),
@@ -741,7 +1240,7 @@ mod tests {
             Some("renamed"),
             dest,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(
             result.is_ok(),
@@ -777,7 +1276,7 @@ mod tests {
             Some("renamed"),
             dest,
             false,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -803,7 +1302,7 @@ mod tests {
             Some("renamed"),
             dest_dir,
             true,
-            "linux",
+            Platform::new("linux", "x86_64"),
         );
         assert!(result.is_ok());
 
