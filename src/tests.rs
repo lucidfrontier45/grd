@@ -103,20 +103,19 @@ fn test_integration_download_extract_save() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
 
+    // The lookup name decides: `rg` on unix, `rg.exe` on Windows.
+    let out_name = if cfg!(windows) { "rg.exe" } else { "rg" };
     let result = extract_and_save(
         source,
         &asset.name,
         "rg",
-        None,
+        out_name,
         dest_dir,
         false,
         naming::Platform::new(env::consts::OS, env::consts::ARCH),
     );
     let extracted_name = result.unwrap();
-
-    // The lookup name decides: `rg` on unix, `rg.exe` on Windows.
-    let expected_name = if cfg!(windows) { "rg.exe" } else { "rg" };
-    assert_eq!(extracted_name, expected_name);
+    assert_eq!(extracted_name, out_name);
 
     let extracted_path = dest_dir.join(&extracted_name);
     assert!(extracted_path.exists());
@@ -148,24 +147,23 @@ fn test_integration_download_extract_save_renamed() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
 
-    let result = extract_and_save(
-        source,
-        &asset.name,
-        "rg",
-        Some("rg-renamed"),
-        dest_dir,
-        false,
-        naming::Platform::new(env::consts::OS, env::consts::ARCH),
-    );
-    let out_name = result.unwrap();
-
-    let expected = if cfg!(windows) {
+    let out_name = if cfg!(windows) {
         "rg-renamed.exe"
     } else {
         "rg-renamed"
     };
-    assert_eq!(out_name, expected);
-    assert!(dest_dir.join(&out_name).exists(), "renamed binary missing");
+    let result = extract_and_save(
+        source,
+        &asset.name,
+        "rg",
+        out_name,
+        dest_dir,
+        false,
+        naming::Platform::new(env::consts::OS, env::consts::ARCH),
+    );
+    let written = result.unwrap();
+    assert_eq!(written, out_name);
+    assert!(dest_dir.join(&written).exists(), "renamed binary missing");
     assert!(
         !dest_dir.join("rg").exists(),
         "the lookup name must not be written alongside the rename value"
@@ -203,7 +201,7 @@ fn test_default_lookup_finds_exe_in_zip_on_windows_target() {
         source,
         "a.zip",
         "a",
-        None,
+        "a.exe",
         dest,
         false,
         naming::Platform::new("windows", "x86_64"),
@@ -227,7 +225,7 @@ fn test_bin_name_matches_platform_suffix() {
         source,
         "app.zip",
         "app-bin",
-        None,
+        "app-bin",
         dest,
         false,
         naming::Platform::new("linux", "x86_64"),
@@ -255,7 +253,7 @@ fn test_bin_name_matches_platform_suffix_on_windows() {
         source,
         "app.zip",
         "app-bin",
-        None,
+        "app-bin.exe",
         dest,
         false,
         naming::Platform::new("windows", "x86_64"),
@@ -280,7 +278,7 @@ fn test_default_lookup_ignores_exe_in_zip_off_windows_target() {
         source,
         "a.zip",
         "a",
-        None,
+        "a",
         dir.path(),
         false,
         naming::Platform::new("linux", "x86_64"),

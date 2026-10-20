@@ -52,6 +52,8 @@ fn validate_rename(rename: &str) -> Result<()> {
 /// `--rename` wins, then `--bin-name`, then the repository basename; a
 /// Windows target always carries a single `.exe` suffix. Under
 /// `--no-decompress` nothing is extracted, so the asset's own name is kept.
+/// This is the single authority for the name: the extractor writes exactly
+/// what it returns instead of re-deriving one.
 fn resolve_out_name(args: &Args, repo: &str, asset_name: &str, os: &str) -> String {
     if args.no_decompress {
         return args
@@ -348,7 +350,9 @@ fn install_release(
 
     let lookup_name = resolve_lookup_name(args, repo);
     // The output name follows the lookup name (`--rename` > `--bin-name` >
-    // repository basename), so it is known before anything is downloaded.
+    // repository basename), so it is known before anything is downloaded —
+    // and it is the single source of truth: the extractor writes exactly
+    // this name instead of re-deriving one.
     let out_name = resolve_out_name(args, repo, &asset.name, platform.os);
     let installed_path = dest.join(&out_name);
     let up_to_date = is_up_to_date(args, cached, release, asset, &installed_path);
@@ -370,7 +374,8 @@ fn install_release(
         return Ok(());
     }
 
-    let out_file = download_and_extract(args, agent, dest, asset, platform, &lookup_name)?;
+    let out_file =
+        download_and_extract(args, agent, dest, asset, platform, &lookup_name, &out_name)?;
 
     let mut cache = state::State::load();
     cache.set_cached(
@@ -395,13 +400,14 @@ fn download_and_extract(
     asset: &github::Asset,
     platform: naming::Platform<'_>,
     lookup_name: &str,
+    out_name: &str,
 ) -> Result<String> {
     let source = download::download_asset(agent, asset, args.memory_limit)?;
     extract::extract_and_save(
         source,
         &asset.name,
         lookup_name,
-        args.rename.as_deref(),
+        out_name,
         dest,
         args.no_decompress,
         platform,
