@@ -10,6 +10,7 @@ use crate::{
     download::{DownloadSource, download_asset},
     extract::extract_and_save,
     github::fetch_release_info,
+    naming,
     state::State,
 };
 
@@ -102,20 +103,19 @@ fn test_integration_download_extract_save() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
 
+    // The lookup name decides: `rg` on unix, `rg.exe` on Windows.
+    let out_name = if cfg!(windows) { "rg.exe" } else { "rg" };
     let result = extract_and_save(
         source,
         &asset.name,
         "rg",
-        None,
+        out_name,
         dest_dir,
         false,
-        env::consts::OS,
+        naming::Platform::new(env::consts::OS, env::consts::ARCH),
     );
     let extracted_name = result.unwrap();
-
-    // The entry keeps its own name: `rg` on unix, `rg.exe` on Windows.
-    let expected_name = if cfg!(windows) { "rg.exe" } else { "rg" };
-    assert_eq!(extracted_name, expected_name);
+    assert_eq!(extracted_name, out_name);
 
     let extracted_path = dest_dir.join(&extracted_name);
     assert!(extracted_path.exists());
@@ -147,24 +147,23 @@ fn test_integration_download_extract_save_renamed() {
     let temp_dir = TempDir::new().unwrap();
     let dest_dir = temp_dir.path();
 
-    let result = extract_and_save(
-        source,
-        &asset.name,
-        "rg",
-        Some("rg-renamed"),
-        dest_dir,
-        false,
-        env::consts::OS,
-    );
-    let out_name = result.unwrap();
-
-    let expected = if cfg!(windows) {
+    let out_name = if cfg!(windows) {
         "rg-renamed.exe"
     } else {
         "rg-renamed"
     };
-    assert_eq!(out_name, expected);
-    assert!(dest_dir.join(&out_name).exists(), "renamed binary missing");
+    let result = extract_and_save(
+        source,
+        &asset.name,
+        "rg",
+        out_name,
+        dest_dir,
+        false,
+        naming::Platform::new(env::consts::OS, env::consts::ARCH),
+    );
+    let written = result.unwrap();
+    assert_eq!(written, out_name);
+    assert!(dest_dir.join(&written).exists(), "renamed binary missing");
     assert!(
         !dest_dir.join("rg").exists(),
         "the lookup name must not be written alongside the rename value"
@@ -190,18 +189,82 @@ fn zip_with_entry(entry: &str, content: &[u8]) -> Vec<u8> {
 }
 
 /// Regression: with the default lookup name (the repo basename `a`) and no
-/// `--bin-name`, a Windows target must find `a.exe` in the archive and keep the
-/// entry's own name on disk.
+/// `--bin-name`, a Windows target must find `a.exe` in the archive and write
+/// it under the lookup name.
 #[test]
 fn test_default_lookup_finds_exe_in_zip_on_windows_target() {
     let source = DownloadSource::Memory(zip_with_entry("a-0.1/a.exe", b"binary-bytes"));
     let dir = TempDir::new().unwrap();
     let dest = dir.path();
 
-    let written = extract_and_save(source, "a.zip", "a", None, dest, false, "windows").unwrap();
+    let written = extract_and_save(
+        source,
+        "a.zip",
+        "a",
+        "a.exe",
+        dest,
+        false,
+        naming::Platform::new("windows", "x86_64"),
+    )
+    .unwrap();
 
     assert_eq!(written, "a.exe");
     assert_eq!(std::fs::read(dest.join("a.exe")).unwrap(), b"binary-bytes");
+}
+
+/// A platform-suffixed binary is selected by `--bin-name` and written
+/// under that name: `app-bin` finds `app-bin-linux-x64`.
+#[test]
+fn test_bin_name_matches_platform_suffix() {
+    let source =
+        DownloadSource::Memory(zip_with_entry("app-1.0/app-bin-linux-x64", b"binary-bytes"));
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path();
+
+    let written = extract_and_save(
+        source,
+        "app.zip",
+        "app-bin",
+        "app-bin",
+        dest,
+        false,
+        naming::Platform::new("linux", "x86_64"),
+    )
+    .unwrap();
+
+    assert_eq!(written, "app-bin");
+    assert_eq!(
+        std::fs::read(dest.join("app-bin")).unwrap(),
+        b"binary-bytes"
+    );
+}
+
+/// The same on a Windows target, where the installed name carries `.exe`.
+#[test]
+fn test_bin_name_matches_platform_suffix_on_windows() {
+    let source = DownloadSource::Memory(zip_with_entry(
+        "app-1.0/app-bin-windows-x64.exe",
+        b"binary-bytes",
+    ));
+    let dir = TempDir::new().unwrap();
+    let dest = dir.path();
+
+    let written = extract_and_save(
+        source,
+        "app.zip",
+        "app-bin",
+        "app-bin.exe",
+        dest,
+        false,
+        naming::Platform::new("windows", "x86_64"),
+    )
+    .unwrap();
+
+    assert_eq!(written, "app-bin.exe");
+    assert_eq!(
+        std::fs::read(dest.join("app-bin.exe")).unwrap(),
+        b"binary-bytes"
+    );
 }
 
 /// The `.exe` candidate is Windows-only: a non-Windows target must not match
@@ -211,7 +274,15 @@ fn test_default_lookup_ignores_exe_in_zip_off_windows_target() {
     let source = DownloadSource::Memory(zip_with_entry("a-0.1/a.exe", b"binary-bytes"));
     let dir = TempDir::new().unwrap();
 
-    let result = extract_and_save(source, "a.zip", "a", None, dir.path(), false, "linux");
+    let result = extract_and_save(
+        source,
+        "a.zip",
+        "a",
+        "a",
+        dir.path(),
+        false,
+        naming::Platform::new("linux", "x86_64"),
+    );
 
     assert!(result.is_err());
 }
@@ -246,15 +317,8 @@ fn test_confirm_upgrade_rejects_arbitrary() {
     assert!(!crate::confirm_upgrade_impl("v1.0.0", "v2.0.0", &mut input));
 }
 
-use std::sync::{Mutex, OnceLock};
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 fn with_state_path(dir: &TempDir, f: impl FnOnce()) {
-    let _lock = env_lock().lock().unwrap();
+    let _lock = crate::state::env_lock().lock().unwrap();
     let state_path = dir.path().join("state.toml");
     unsafe {
         env::set_var("GRD_STATE_PATH", &state_path);

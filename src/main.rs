@@ -21,6 +21,19 @@ fn resolve_lookup_name(args: &Args, repo: &str) -> String {
         .unwrap_or_else(|| repo.split('/').next_back().unwrap_or("app").to_string())
 }
 
+/// Reject `--bin-name` values that cannot become a plain on-disk filename.
+///
+/// `--bin-name` names the installed file, so a value like `..` or `/` would
+/// escape the destination directory. A path (`pkg/bin/app`) is fine: only its
+/// last component becomes the file name.
+fn validate_bin_name(bin_name: &str) -> Result<()> {
+    let base = naming::base_name(bin_name);
+    if base.is_empty() || base == "." || base == ".." {
+        bail!("--bin-name must name a file, not a path: '{bin_name}'");
+    }
+    Ok(())
+}
+
 /// Reject `--rename` values that could escape the destination directory.
 /// `dest.join(rename)` honors any separator inside `rename`, so a value such
 /// as `../../etc/cron.d/pwn` would write outside `dest`.
@@ -34,19 +47,21 @@ fn validate_rename(rename: &str) -> Result<()> {
     Ok(())
 }
 
-/// Output filename that is known before extraction, if any.
+/// Name the installed binary will have.
 ///
-/// An explicit `--rename` (with the Windows `.exe` rule) or the asset's own
-/// name under `--no-decompress` is known up front; otherwise the name comes
-/// from the matched archive entry and is only known after extraction.
-fn resolve_known_out_name(args: &Args, asset_name: &str, os: &str) -> Option<String> {
-    if let Some(rename) = &args.rename {
-        Some(naming::rename_output(rename, os))
-    } else if args.no_decompress {
-        Some(asset_name.to_string())
-    } else {
-        None
+/// `--rename` wins, then `--bin-name`, then the repository basename; a
+/// Windows target always carries a single `.exe` suffix. Under
+/// `--no-decompress` nothing is extracted, so the asset's own name is kept.
+/// This is the single authority for the name: the extractor writes exactly
+/// what it returns instead of re-deriving one.
+fn resolve_out_name(args: &Args, repo: &str, asset_name: &str, os: &str) -> String {
+    if args.no_decompress {
+        return args
+            .rename
+            .as_deref()
+            .map_or_else(|| asset_name.to_string(), |r| naming::rename_output(r, os));
     }
+    naming::installed_name(args.rename.as_deref(), &resolve_lookup_name(args, repo), os)
 }
 
 fn main() -> Result<()> {
@@ -173,7 +188,15 @@ fn run_install(args: &Args) -> Result<()> {
     let asset = pick_asset(args, &release, &os, &arch)?;
     println!("Selected asset: {}", asset.name);
 
-    install_release(args, &agent, repo, &dest, &release, &asset, &os)
+    install_release(
+        args,
+        &agent,
+        repo,
+        &dest,
+        &release,
+        &asset,
+        naming::Platform::new(&os, &arch),
+    )
 }
 
 /// Destination directory: `--destination`, else the registered default, else
@@ -206,6 +229,9 @@ fn prepare_request(args: &Args) -> Result<(Agent, &str)> {
         .context("a repo argument is required")?;
     if let Some(rename) = &args.rename {
         validate_rename(rename)?;
+    }
+    if let Some(bin_name) = &args.bin_name {
+        validate_bin_name(bin_name)?;
     }
     Ok((agent, repo))
 }
@@ -317,29 +343,22 @@ fn install_release(
     dest: &Path,
     release: &github::Release,
     asset: &github::Asset,
-    os: &str,
+    platform: naming::Platform<'_>,
 ) -> Result<()> {
     let cache = state::State::load();
     let cached = cache.get_cached(repo);
 
     let lookup_name = resolve_lookup_name(args, repo);
-    // The output filename is known before extraction only for an explicit
-    // `--rename` or `--no-decompress`; otherwise it is the matched archive
-    // entry's own name, which only the extractor can report.
-    let out_name = resolve_known_out_name(args, &asset.name, os)
-        .or_else(|| cached.map(|c| c.installed_filename(repo)));
-    let installed_path = out_name.as_ref().map(|name| dest.join(name));
+    // The output name follows the lookup name (`--rename` > `--bin-name` >
+    // repository basename), so it is known before anything is downloaded —
+    // and it is the single source of truth: the extractor writes exactly
+    // this name instead of re-deriving one.
+    let out_name = resolve_out_name(args, repo, &asset.name, platform.os);
+    let installed_path = dest.join(&out_name);
     let up_to_date = is_up_to_date(args, cached, release, asset, &installed_path);
 
     if args.dry_run {
-        return dry_run_report(
-            dest,
-            repo,
-            release,
-            asset,
-            out_name.as_deref().unwrap_or(&lookup_name),
-            up_to_date,
-        );
+        return dry_run_report(dest, repo, release, asset, &out_name, up_to_date);
     }
 
     if up_to_date {
@@ -355,7 +374,8 @@ fn install_release(
         return Ok(());
     }
 
-    let out_file = download_and_extract(args, agent, dest, asset, os, &lookup_name)?;
+    let out_file =
+        download_and_extract(args, agent, dest, asset, platform, &lookup_name, &out_name)?;
 
     let mut cache = state::State::load();
     cache.set_cached(
@@ -378,18 +398,19 @@ fn download_and_extract(
     agent: &Agent,
     dest: &Path,
     asset: &github::Asset,
-    os: &str,
+    platform: naming::Platform<'_>,
     lookup_name: &str,
+    out_name: &str,
 ) -> Result<String> {
     let source = download::download_asset(agent, asset, args.memory_limit)?;
     extract::extract_and_save(
         source,
         &asset.name,
         lookup_name,
-        args.rename.as_deref(),
+        out_name,
         dest,
         args.no_decompress,
-        os,
+        platform,
     )
 }
 
@@ -411,8 +432,8 @@ fn is_confirmed(args: &Args) -> bool {
 }
 
 /// True when a previously installed binary exists at `installed_path`.
-fn install_exists(installed_path: &Option<PathBuf>) -> bool {
-    installed_path.as_ref().is_some_and(|p| p.exists())
+fn install_exists(installed_path: &Path) -> bool {
+    installed_path.exists()
 }
 
 /// True when the cached record already matches this release and asset.
@@ -431,14 +452,14 @@ fn is_up_to_date(
     cached: Option<&state::CachedRelease>,
     release: &github::Release,
     asset: &github::Asset,
-    installed_path: &Option<PathBuf>,
+    installed_path: &Path,
 ) -> bool {
     !is_forced(args) && is_same_version(cached, release, asset) && install_exists(installed_path)
 }
 
 /// True when an existing install should be confirmed interactively before
 /// being upgraded.
-fn needs_upgrade_confirmation(args: &Args, installed_path: &Option<PathBuf>) -> bool {
+fn needs_upgrade_confirmation(args: &Args, installed_path: &Path) -> bool {
     !is_forced(args)
         && !is_tag_pinned(args)
         && install_exists(installed_path)
@@ -532,35 +553,98 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_known_out_name_rename_appends_exe_on_windows() {
+    fn test_resolve_out_name_rename_appends_exe_on_windows() {
         let args = Args::parse_from(["grd", "owner/prj", "--rename", "tool"]);
         assert_eq!(
-            resolve_known_out_name(&args, "asset.tar.gz", "windows"),
-            Some("tool.exe".to_string())
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "windows"),
+            "tool.exe"
         );
     }
 
     #[test]
-    fn test_resolve_known_out_name_rename_verbatim_off_windows() {
+    fn test_resolve_out_name_rename_verbatim_off_windows() {
         let args = Args::parse_from(["grd", "owner/prj", "--rename", "tool"]);
         assert_eq!(
-            resolve_known_out_name(&args, "asset.tar.gz", "linux"),
-            Some("tool".to_string())
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "tool"
         );
     }
 
     #[test]
-    fn test_resolve_known_out_name_no_decompress_uses_asset_name() {
+    fn test_resolve_out_name_no_decompress_uses_asset_name() {
         let args = Args::parse_from(["grd", "owner/prj", "--no-decompress"]);
         assert_eq!(
-            resolve_known_out_name(&args, "asset.tar.gz", "linux"),
-            Some("asset.tar.gz".to_string())
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "asset.tar.gz"
         );
     }
 
     #[test]
-    fn test_resolve_known_out_name_defaults_to_none() {
+    fn test_resolve_out_name_defaults_to_repo_basename() {
         let args = Args::parse_from(["grd", "owner/prj"]);
-        assert_eq!(resolve_known_out_name(&args, "asset.tar.gz", "linux"), None);
+        assert_eq!(
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "prj"
+        );
+    }
+
+    #[test]
+    fn test_resolve_out_name_uses_bin_name() {
+        let args = Args::parse_from(["grd", "owner/prj", "--bin-name", "app-bin"]);
+        assert_eq!(
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "app-bin"
+        );
+    }
+
+    #[test]
+    fn test_resolve_out_name_bin_name_gets_exe_on_windows() {
+        let args = Args::parse_from(["grd", "owner/prj", "--bin-name", "app-bin"]);
+        assert_eq!(
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "windows"),
+            "app-bin.exe"
+        );
+    }
+
+    #[test]
+    fn test_resolve_out_name_rename_wins_over_bin_name() {
+        let args = Args::parse_from([
+            "grd",
+            "owner/prj",
+            "--bin-name",
+            "app-bin",
+            "--rename",
+            "other",
+        ]);
+        assert_eq!(
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "other"
+        );
+    }
+
+    #[test]
+    fn test_resolve_out_name_bin_name_path_uses_last_component() {
+        let args = Args::parse_from(["grd", "owner/prj", "--bin-name", "pkg/bin/app"]);
+        assert_eq!(
+            resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
+            "app"
+        );
+    }
+
+    #[test]
+    fn test_validate_bin_name_accepts_plain_names_and_paths() {
+        assert!(validate_bin_name("app-bin").is_ok());
+        assert!(validate_bin_name("pkg/bin/app").is_ok());
+    }
+
+    #[test]
+    fn test_validate_bin_name_rejects_paths_that_escape() {
+        for bad in ["..", ".", "/", "\\", "a/../.."] {
+            let err = validate_bin_name(bad).unwrap_err().to_string();
+            assert!(
+                err.contains("--bin-name"),
+                "error for '{bad}' should name the flag: {err}"
+            );
+        }
     }
 }

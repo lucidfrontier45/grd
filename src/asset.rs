@@ -272,6 +272,38 @@ fn is_allowed_by_extension(name: &str) -> bool {
     }
 }
 
+/// Platform match score of `name` for the target platform.
+///
+/// 2 points for the exact OS token, 1 for an OS alias, 1 for the target arch
+/// and 1 for a musl build on linux. Zero means the name names no platform at
+/// all. Shared with the archive-entry lookup in `src/extract.rs`.
+pub fn platform_score(name: &str, target_os: &str, target_arch: &str) -> i32 {
+    calculate_match_score(name, target_os, target_arch)
+}
+
+/// True when `name` names the target OS (see `OS_ALIASES`).
+pub fn names_os(name: &str, target_os: &str) -> bool {
+    os_score(&name.to_lowercase(), target_os) > 0
+}
+
+/// The canonical OS names `grd` knows about.
+const CANONICAL_OSES: &[&str] = &["windows", "macos", "linux"];
+
+/// The OS that `name` names when it is not the target one, if any.
+///
+/// Used to warn when a selected archive entry names a platform other than
+/// the target (a `windows` build for a `linux` target, say). A name with
+/// no OS token at all (`app-bin-v1.2.3`) names none. The competing-OS
+/// exclusions apply (see `OS_EXCLUSIONS`), so `darwin` is not mistaken
+/// for `win`.
+pub fn other_named_os(name: &str, target_os: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    CANONICAL_OSES
+        .iter()
+        .copied()
+        .find(|os| *os != target_os && !os_excludes(&lower, os) && os_score(&lower, os) > 0)
+}
+
 fn calculate_match_score(asset_name: &str, target_os: &str, target_arch: &str) -> i32 {
     let name = asset_name.to_lowercase();
 
@@ -798,6 +830,19 @@ mod tests {
         assert!(normalize_os("freebsd").is_err());
         assert!(normalize_os("android").is_err());
         assert!(normalize_os("invalid").is_err());
+    }
+
+    #[test]
+    fn test_other_named_os_flags_foreign_builds() {
+        assert_eq!(
+            other_named_os("app-windows-x64.exe", "linux"),
+            Some("windows")
+        );
+        assert_eq!(other_named_os("app-darwin-aarch64", "linux"), Some("macos"));
+        assert_eq!(other_named_os("app-linux-x64", "windows"), Some("linux"));
+        // The target OS itself, and names without any OS token, name none.
+        assert_eq!(other_named_os("app-linux-x64", "linux"), None);
+        assert_eq!(other_named_os("app-bin-v1.2.3", "linux"), None);
     }
 
     #[test]

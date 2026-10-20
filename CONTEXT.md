@@ -97,6 +97,21 @@ The filename of an installed executable. It resolves independently of **which** 
 | Default | Repository basename (`grd owner/fd` → `fd`) |
 | Windows | A trailing `.exe` is stripped then re-appended, so `--rename fd.exe` and `--rename fd` agree |
 | `--no-decompress` | No extraction happens; the output is the asset name unless `--rename` is given |
-| Containment | `--rename` rejects empty values and any `/`, `\`, or `..` — `dest.join(name)` would otherwise escape the destination |
+| Bare asset | A release that ships the binary directly, without an archive, is named after the lookup name too |
+| Containment | `--rename` rejects empty values and any `/`, `\`, or `..` — `dest.join(name)` would otherwise escape the destination. `--bin-name` may contain a path (`pkg/bin/app`); only its last component becomes the installed filename |
 | Recorded as | `binary` in `state.toml`, so `remove` / `info` locate custom-named installs |
+
+The archive entry is never parsed for a platform suffix: the installed name comes
+from the lookup name, not from the entry's own filename.
+
+## Archive Entry Lookup
+Which entry inside a downloaded archive is extracted. Two rules, in order:
+
+| Aspect | Behavior |
+|--------|----------|
+| Exact match | The entry path ends with the lookup name at a path-component boundary (`pi` matches `pi-bolt-linux-x64/pi`, never `LICENSE.pi`) |
+| Platform suffix | Otherwise the entry's basename starts with the lookup name: `app-bin` matches `app-bin-linux-x64`. Candidates are ranked with the same OS/arch/musl score used for assets; the best one wins, a tie is an error |
+| Qualification | A suffixed candidate must name the target OS or carry a `-`/`_` tag, so `pi` never matches `pilot` |
+| Windows | A trailing `.exe` is ignored while matching (`fd` finds `fd.exe`) |
+| Saved as | The lookup name, never the entry's own filename |
 

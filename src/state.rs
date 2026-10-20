@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::{collections::HashMap, env, fs, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -180,16 +182,21 @@ impl State {
     }
 }
 
+/// Lock guarding the `GRD_STATE_PATH` environment variable.
+///
+/// Shared with the integration tests in `src/tests.rs`: both write the same
+/// variable, so they must never run at the same time.
+#[cfg(test)]
+pub(crate) fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     use super::*;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     struct StatePathEnvGuard {
         _lock: MutexGuard<'static, ()>,
