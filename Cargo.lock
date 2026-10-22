@@ -369,10 +369,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenv"
-version = "0.15.0"
+name = "dotenv-ng"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
+checksum = "2ba18c2f7e5db9acfc420d2706b104cc04b074ee609f1ee3be1383d8da7d96bb"
+dependencies = [
+ "dotenv-ng-core",
+]
+
+[[package]]
+name = "dotenv-ng-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96cd2d7607be76b700f707349fe6f48970385220c7c3a59a72e4dcb5e19143ca"
 
 [[package]]
 name = "encode_unicode"
@@ -492,7 +501,7 @@ version = "0.12.4"
 dependencies = [
  "anyhow",
  "clap",
- "dotenv",
+ "dotenv-ng",
  "flate2",
  "indicatif",
  "lzma-rs",

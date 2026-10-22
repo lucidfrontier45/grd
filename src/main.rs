@@ -67,6 +67,13 @@ fn resolve_out_name(args: &Args, repo: &str, asset_name: &str, os: &str) -> Stri
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // No env file is loaded implicitly; only the explicitly requested one.
+    if let Some(env_file) = args.env_file.as_deref() {
+        // SAFETY: this is the first thing `main` does, so no other thread
+        // exists yet that could observe the environment being mutated.
+        unsafe { config::load_env_file(env_file)? };
+    }
+
     match &args.command {
         Some(command) => run_command(command),
         None => run_install(&args),

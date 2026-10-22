@@ -25,6 +25,7 @@ target
 
 /target
 .env
+testing.env
 .codegraph
 .pi/
 .todos/

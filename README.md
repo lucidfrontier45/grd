@@ -50,15 +50,18 @@ export GITHUB_PAT=your_token_here
 export GITHUB_TOKEN=your_token_here
 ```
 
-**Using a .env file:**
+**Using an env file:**
 
-Create a `.env` file in your working directory:
+`grd` never loads an env file automatically. Pass one explicitly with
+`--env-file`; the file uses dotenv-style `KEY=value` lines (see
+[`.env.example`](.env.example)):
 
 ```bash
-GITHUB_PAT=your_token_here
+grd --env-file .env owner/repo
 ```
 
-The `GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
+Variables that are already set in the environment are **not** overridden. The
+`GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
 
 ## Subcommands
 
@@ -303,10 +306,26 @@ repository in `~/.grd/state.toml`:
 - `-y / --yes`: Skip the upgrade confirmation prompt.
 - `--os`: Target OS (windows, macos, linux). Defaults to auto-detection.
 - `--arch`: Target architecture (x86_64, aarch64, loong64, amd64, x64, arm64, loongarch64). Defaults to auto-detection. Aliases: amd64 and x64 → x86_64; arm64 → aarch64; loongarch64 → loong64.
+- `--env-file FILE`: Load environment variables (e.g. `GITHUB_PAT`) from a dotenv-style file before running. No env file is loaded when the option is absent, and variables that are already set in the environment are not overridden.
 
 When default asset matching finds multiple candidates, `grd` prints matching assets and exits non-zero. Use filters or `--select` to choose interactively.
 
 Remaining ties are genuine ambiguity — for example two assets of the same score and arch that differ only by extension. A `gnu`/`musl` pair on Linux is **not** a tie any more: the musl asset wins (see [libc Preference](#libc-preference)).
+
+## Testing
+
+The test suite automatically loads a `testing.env` file from the crate root
+when it exists (`cargo test` runs with the crate root as the working
+directory). Copy the template and fill in your token:
+
+```bash
+cp testing.env.example testing.env
+```
+
+`testing.env` is gitignored and is only ever read by the test suite — the
+`grd` binary itself never loads an env file implicitly. Variables from the file
+are used for `GITHUB_PAT`/`GITHUB_TOKEN` only when they are not already set in
+the environment.
 
 ## Building
 

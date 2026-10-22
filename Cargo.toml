@@ -14,7 +14,7 @@ readme = "README.md"
 [dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
-dotenv = "0.15.0"
+dotenv-ng = "1.0.0"
 flate2 = "1.1.8"
 indicatif = "0.18.3"
 serde = { version = "1.0.228", features = ["derive"] }

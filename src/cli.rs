@@ -60,6 +60,11 @@ pub struct Args {
 
     #[arg(long)]
     pub arch: Option<String>,
+
+    /// Load environment variables (e.g. GITHUB_PAT) from a dotenv-style file.
+    /// Variables already set in the environment are not overridden.
+    #[arg(long, value_name = "FILE")]
+    pub env_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -226,5 +231,24 @@ mod tests {
         let args = Args::parse_from(["grd", "owner/prj", "--bin-name", "exe1", "--rename", "exe2"]);
         assert_eq!(args.bin_name.as_deref(), Some("exe1"));
         assert_eq!(args.rename.as_deref(), Some("exe2"));
+    }
+
+    #[test]
+    fn test_env_file_defaults_to_none() {
+        let args = Args::parse_from(["grd", "owner/repo"]);
+        assert!(args.env_file.is_none());
+    }
+
+    #[test]
+    fn test_env_file_flag_parses() {
+        let args = Args::parse_from(["grd", "owner/repo", "--env-file", ".env"]);
+        assert_eq!(args.env_file, Some(PathBuf::from(".env")));
+    }
+
+    #[test]
+    fn test_env_file_flag_works_with_subcommands() {
+        let args = Args::parse_from(["grd", "--env-file", "secrets.env", "list-installed"]);
+        assert_eq!(args.env_file, Some(PathBuf::from("secrets.env")));
+        assert!(matches!(args.command, Some(Command::ListInstalled)));
     }
 }
