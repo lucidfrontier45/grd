@@ -221,7 +221,10 @@ fn extract_zip(
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .context("Failed to read ZIP entry name")?
+            .into_owned();
         if is_entry_match(&name, lookup_name, os) {
             write_zip_entry(&mut file, dest_dir, out_name)?;
             return Ok(out_name.to_string());
