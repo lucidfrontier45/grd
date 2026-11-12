@@ -126,10 +126,26 @@ fn next_page_url(link_header: &str, endpoint: &str) -> Result<Option<String>> {
     }) else {
         bail!("GitHub returned a malformed releases pagination link");
     };
-    if !url.starts_with(endpoint) {
+    if !is_trusted_releases_page_url(url, endpoint) {
         bail!("GitHub returned an unexpected releases pagination URL");
     }
     Ok(Some(url.to_string()))
+}
+
+fn is_trusted_releases_page_url(url: &str, endpoint: &str) -> bool {
+    if url.starts_with(endpoint) {
+        return true;
+    }
+
+    let Some(repository_path) = url.strip_prefix("https://api.github.com/repositories/") else {
+        return false;
+    };
+    let Some((repository_id, query)) = repository_path.split_once("/releases?") else {
+        return false;
+    };
+    !repository_id.is_empty()
+        && repository_id.bytes().all(|byte| byte.is_ascii_digit())
+        && !query.is_empty()
 }
 
 pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Result<Release> {
@@ -347,13 +363,20 @@ mod tests {
     #[test]
     fn test_next_page_url_follows_github_next_link() {
         let endpoint = "https://api.github.com/repos/owner/repo/releases?";
-        let link = "<https://api.github.com/repos/owner/repo/releases?per_page=100&page=2>; rel=\"next\", <https://api.github.com/repos/owner/repo/releases?per_page=100&page=4>; rel=\"last\"";
+        let link = "<https://api.github.com/repositories/212613049/releases?per_page=100&page=2>; rel=\"next\", <https://api.github.com/repositories/212613049/releases?per_page=100&page=4>; rel=\"last\"";
         assert_eq!(
             next_page_url(link, endpoint).unwrap().as_deref(),
-            Some("https://api.github.com/repos/owner/repo/releases?per_page=100&page=2")
+            Some("https://api.github.com/repositories/212613049/releases?per_page=100&page=2")
         );
         assert_eq!(next_page_url("", endpoint).unwrap(), None);
         assert!(next_page_url("<https://example.com/evil>; rel=\"next\"", endpoint).is_err());
+        assert!(
+            next_page_url(
+                "<https://api.github.com/repositories/not-an-id/releases?page=2>; rel=\"next\"",
+                endpoint
+            )
+            .is_err()
+        );
     }
 
     #[test]
