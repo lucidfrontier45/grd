@@ -196,9 +196,9 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
 }
 
 /// Fetch the newest stable release across all tag families, for fresh
-/// installs where no tag is cached. GitHub's `/releases/latest` is
-/// owner-controlled and may point at an older version stream, so the release
-/// list is scanned and the highest parsed version wins.
+/// installs where no tag is cached. Like [`fetch_upgrade_release`], this
+/// scans the release list instead of trusting owner-controlled
+/// `/releases/latest` — see that function's docs for the rationale.
 pub fn fetch_install_release(agent: &Agent, repo: &str) -> Result<Release> {
     let releases = list_releases(agent, repo)?;
     select_latest_release(releases)
@@ -232,7 +232,10 @@ pub fn fetch_upgrade_release(
 }
 
 /// The newest stable release across all tag families. Prereleases, drafts and
-/// tags without a parseable version are ignored.
+/// tags without a parseable version are ignored. Ties on
+/// `[major, minor, patch]` (e.g. `2.2.9` vs `v2.2.9`) are broken
+/// deterministically: the shortest version prefix wins, then the
+/// lexicographically smallest.
 fn select_latest_release(releases: Vec<Release>) -> Option<Release> {
     releases
         .into_iter()
@@ -243,7 +246,12 @@ fn select_latest_release(releases: Vec<Release>) -> Option<Release> {
             let version = parse_tag_version(&release.tag_name)?;
             Some((version, release))
         })
-        .max_by_key(|(version, _)| version.parts)
+        .max_by(|(a, _), (b, _)| {
+            a.parts
+                .cmp(&b.parts)
+                .then_with(|| b.stream.len().cmp(&a.stream.len()))
+                .then_with(|| b.stream.cmp(&a.stream))
+        })
         .map(|(_, release)| release)
 }
 
@@ -455,6 +463,28 @@ mod tests {
             test_release("changelog", false, false),
         ];
         assert!(select_latest_release(releases).is_none());
+    }
+
+    #[test]
+    fn test_select_latest_release_breaks_part_ties_deterministically() {
+        // Same parts in different tag families: the shortest version prefix
+        // wins, then the lexicographically smallest — independent of the
+        // order the releases arrive in.
+        let releases = vec![
+            test_release("app-v2.2.9", false, false),
+            test_release("2.2.9", false, false),
+            test_release("v2.2.9", false, false),
+        ];
+        let selected = select_latest_release(releases).unwrap();
+        assert_eq!(selected.tag_name, "2.2.9");
+
+        let reversed = vec![
+            test_release("v2.2.9", false, false),
+            test_release("2.2.9", false, false),
+            test_release("app-v2.2.9", false, false),
+        ];
+        let selected = select_latest_release(reversed).unwrap();
+        assert_eq!(selected.tag_name, "2.2.9");
     }
 
     #[test]
