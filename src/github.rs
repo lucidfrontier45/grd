@@ -195,6 +195,16 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
         .context("Failed to parse release info")
 }
 
+/// Fetch the newest stable release across all tag families, for fresh
+/// installs where no tag is cached. Like [`fetch_upgrade_release`], this
+/// scans the release list instead of trusting owner-controlled
+/// `/releases/latest` — see that function's docs for the rationale.
+pub fn fetch_install_release(agent: &Agent, repo: &str) -> Result<Release> {
+    let releases = list_releases(agent, repo)?;
+    select_latest_release(releases)
+        .ok_or_else(|| anyhow::anyhow!("No stable releases found for {repo}"))
+}
+
 /// Fetch the newest release in the same tag family as an installed version.
 /// GitHub's `/releases/latest` is owner-controlled and may point at another
 /// version stream, so upgrades with a cached tag inspect the release list.
@@ -204,11 +214,11 @@ pub fn fetch_upgrade_release(
     cached_tag: Option<&str>,
 ) -> Result<Release> {
     let Some(cached_tag) = cached_tag else {
-        return fetch_release_info(agent, repo, None);
+        return fetch_install_release(agent, repo);
     };
 
     let Some(cached_version) = parse_tag_version(cached_tag) else {
-        return fetch_release_info(agent, repo, None);
+        return fetch_install_release(agent, repo);
     };
     let releases = list_releases(agent, repo)?;
     let selected = select_upgrade_release(releases, &cached_version);
@@ -219,6 +229,30 @@ pub fn fetch_upgrade_release(
             cached_version.family
         ),
     }
+}
+
+/// The newest stable release across all tag families. Prereleases, drafts and
+/// tags without a parseable version are ignored. Ties on
+/// `[major, minor, patch]` (e.g. `2.2.9` vs `v2.2.9`) are broken
+/// deterministically: the shortest version prefix wins, then the
+/// lexicographically smallest.
+fn select_latest_release(releases: Vec<Release>) -> Option<Release> {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            if release.prerelease || release.draft {
+                return None;
+            }
+            let version = parse_tag_version(&release.tag_name)?;
+            Some((version, release))
+        })
+        .max_by(|(a, _), (b, _)| {
+            a.parts
+                .cmp(&b.parts)
+                .then_with(|| b.stream.len().cmp(&a.stream.len()))
+                .then_with(|| b.stream.cmp(&a.stream))
+        })
+        .map(|(_, release)| release)
 }
 
 fn select_upgrade_release(releases: Vec<Release>, cached_version: &TagVersion) -> Option<Release> {
@@ -405,6 +439,57 @@ mod tests {
         .unwrap();
         let selected = select_upgrade_release(releases, &cached_version).unwrap();
         assert_eq!(selected.tag_name, "v2.2.9");
+    }
+
+    #[test]
+    fn test_select_latest_release_ignores_owner_latest_marker_and_other_families() {
+        // anomalyco/opencode-style list: the owner marked v1.19.5 as
+        // `/releases/latest`, but v2.2.7 exists unmarked alongside a
+        // `process-daemon-v0.5.2` sub-project stream.
+        let releases = vec![
+            test_release("process-daemon-v0.5.2", false, false),
+            test_release("v2.2.7", false, false),
+            test_release("v1.19.5", false, false),
+        ];
+        let selected = select_latest_release(releases).unwrap();
+        assert_eq!(selected.tag_name, "v2.2.7");
+    }
+
+    #[test]
+    fn test_select_latest_release_skips_prereleases_drafts_and_unparseable_tags() {
+        let releases = vec![
+            test_release("v2.2.8-rc.1", true, false),
+            test_release("v2.2.9", false, true),
+            test_release("changelog", false, false),
+        ];
+        assert!(select_latest_release(releases).is_none());
+    }
+
+    #[test]
+    fn test_select_latest_release_breaks_part_ties_deterministically() {
+        // Same parts in different tag families: the shortest version prefix
+        // wins, then the lexicographically smallest — independent of the
+        // order the releases arrive in.
+        let releases = vec![
+            test_release("app-v2.2.9", false, false),
+            test_release("2.2.9", false, false),
+            test_release("v2.2.9", false, false),
+        ];
+        let selected = select_latest_release(releases).unwrap();
+        assert_eq!(selected.tag_name, "2.2.9");
+
+        let reversed = vec![
+            test_release("v2.2.9", false, false),
+            test_release("2.2.9", false, false),
+            test_release("app-v2.2.9", false, false),
+        ];
+        let selected = select_latest_release(reversed).unwrap();
+        assert_eq!(selected.tag_name, "2.2.9");
+    }
+
+    #[test]
+    fn test_select_latest_release_empty_list_is_none() {
+        assert!(select_latest_release(vec![]).is_none());
     }
 
     fn test_release(tag: &str, prerelease: bool, draft: bool) -> Release {
