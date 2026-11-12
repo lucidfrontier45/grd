@@ -124,6 +124,70 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
         .context("Failed to parse release info")
 }
 
+/// Fetch the newest release in the same tag family as an installed version.
+/// GitHub's `/releases/latest` is owner-controlled and may point at another
+/// version stream, so upgrades with a cached tag inspect the release list.
+pub fn fetch_upgrade_release(agent: &Agent, repo: &str, cached_tag: Option<&str>) -> Result<Release> {
+    let Some(cached_tag) = cached_tag else {
+        return fetch_release_info(agent, repo, None);
+    };
+
+    let Some(cached_version) = parse_tag_version(cached_tag) else {
+        return fetch_release_info(agent, repo, None);
+    };
+    let releases = list_releases(agent, repo)?;
+    let selected = releases
+        .into_iter()
+        .filter_map(|release| {
+            let version = parse_tag_version(&release.tag_name)?;
+            (version.family == cached_version.family).then_some((version, release))
+        })
+        .max_by_key(|(version, _)| version.parts)
+        .map(|(_, release)| release);
+    match selected {
+        Some(release) => Ok(release),
+        None => bail!(
+            "No releases found for {repo} in the installed tag family '{}'; refusing to select an unrelated release",
+            cached_version.family
+        ),
+    }
+}
+
+/// Whether `target` is an older version in the same tag family as `installed`.
+pub fn is_downgrade(target: &str, installed: &str) -> bool {
+    match (parse_tag_version(target), parse_tag_version(installed)) {
+        (Some(target), Some(installed)) => {
+            target.stream == installed.stream && target.parts < installed.parts
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TagVersion {
+    stream: String,
+    family: String,
+    parts: [u64; 3],
+}
+
+fn parse_tag_version(tag: &str) -> Option<TagVersion> {
+    let version_start = tag.find(|character: char| character.is_ascii_digit())?;
+    let (prefix, version) = tag.split_at(version_start);
+    let core = version.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(TagVersion {
+        stream: prefix.to_string(),
+        family: format!("{prefix}{major}"),
+        parts: [major, minor, patch],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +256,26 @@ mod tests {
         assert!(validate_repo("a.b-c_d/x.y-z_w").is_ok());
         // Single-char segments are allowed by GitHub.
         assert!(validate_repo("a/b").is_ok());
+    }
+
+    #[test]
+    fn test_tag_versions_compare_only_within_same_family() {
+        assert!(is_downgrade("v1.19.5", "v2.2.7"));
+        assert!(is_downgrade("v2.2.6", "v2.2.7"));
+        assert!(!is_downgrade("v2.2.8", "v2.2.7"));
+        assert!(!is_downgrade("process-daemon-v0.5.2", "v2.2.7"));
+    }
+
+    #[test]
+    fn test_parse_tag_version_retains_tag_family() {
+        assert_eq!(parse_tag_version("v2.2.7").unwrap().family, "v2");
+        assert_eq!(
+            parse_tag_version("process-daemon-v0.5.2")
+                .unwrap()
+                .family,
+            "process-daemon-v0"
+        );
+        assert!(parse_tag_version("release-candidate").is_none());
     }
 
     #[test]
