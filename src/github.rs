@@ -127,7 +127,11 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
 /// Fetch the newest release in the same tag family as an installed version.
 /// GitHub's `/releases/latest` is owner-controlled and may point at another
 /// version stream, so upgrades with a cached tag inspect the release list.
-pub fn fetch_upgrade_release(agent: &Agent, repo: &str, cached_tag: Option<&str>) -> Result<Release> {
+pub fn fetch_upgrade_release(
+    agent: &Agent,
+    repo: &str,
+    cached_tag: Option<&str>,
+) -> Result<Release> {
     let Some(cached_tag) = cached_tag else {
         return fetch_release_info(agent, repo, None);
     };
@@ -270,9 +274,7 @@ mod tests {
     fn test_parse_tag_version_retains_tag_family() {
         assert_eq!(parse_tag_version("v2.2.7").unwrap().family, "v2");
         assert_eq!(
-            parse_tag_version("process-daemon-v0.5.2")
-                .unwrap()
-                .family,
+            parse_tag_version("process-daemon-v0.5.2").unwrap().family,
             "process-daemon-v0"
         );
         assert!(parse_tag_version("release-candidate").is_none());
