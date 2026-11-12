@@ -188,7 +188,22 @@ fn run_install(args: &Args) -> Result<()> {
         return list_available_releases(&agent, repo);
     }
 
-    let release = github::fetch_release_info(&agent, repo, args.tag.as_deref())?;
+    let cached_tag = state::State::load()
+        .get_cached(repo)
+        .map(|cached| cached.tag.clone());
+    let release = match args.tag.as_deref() {
+        Some(tag) => github::fetch_release_info(&agent, repo, Some(tag))?,
+        None => github::fetch_upgrade_release(&agent, repo, cached_tag.as_deref())?,
+    };
+    if args.tag.is_none()
+        && let Some(installed_tag) = cached_tag.as_deref()
+        && github::is_downgrade(&release.tag_name, installed_tag)
+    {
+        bail!(
+            "refusing to downgrade {repo} from {installed_tag} to {}; use --tag to install a specific version",
+            release.tag_name
+        );
+    }
     println!("Selected version: {}", release.tag_name);
 
     let (os, arch) = detect_platform(args)?;
