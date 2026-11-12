@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use ureq::{Agent, Error as UreqError};
@@ -41,6 +43,10 @@ fn validate_repo(repo: &str) -> Result<(&str, &str)> {
 pub struct Release {
     pub tag_name: String,
     pub assets: Vec<Asset>,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -52,29 +58,78 @@ pub struct Asset {
 
 pub fn list_releases(agent: &Agent, repo: &str) -> Result<Vec<Release>> {
     validate_repo(repo)?;
-    let url = format!("https://api.github.com/repos/{repo}/releases");
-    let mut response = match agent.get(&url).call() {
-        Ok(r) => r,
-        Err(UreqError::StatusCode(status_code)) => {
-            if is_unauthorized(status_code) {
-                bail!(
-                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
-                );
+    let endpoint = format!("https://api.github.com/repos/{repo}/releases?");
+    let first_url = format!("{endpoint}per_page=100&page=1");
+    collect_release_pages(Some(first_url), |url| {
+        let mut response = match agent.get(url).call() {
+            Ok(r) => r,
+            Err(UreqError::StatusCode(status_code)) => {
+                if is_unauthorized(status_code) {
+                    bail!(
+                        "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                    );
+                }
+                if is_rate_limited(status_code) {
+                    bail!(
+                        "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                    );
+                }
+                bail!("Failed to list releases for {}: HTTP {}", repo, status_code);
             }
-            if is_rate_limited(status_code) {
-                bail!(
-                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
-                );
-            }
-            bail!("Failed to list releases for {}: HTTP {}", repo, status_code);
-        }
-        Err(e) => return Err(e).context("Failed to list releases"),
-    };
+            Err(e) => return Err(e).context("Failed to list releases"),
+        };
+        let next_url = response
+            .headers()
+            .get("link")
+            .and_then(|value| value.to_str().ok())
+            .map(|link| next_page_url(link, &endpoint))
+            .transpose()?
+            .flatten();
+        let releases: Vec<Release> = response
+            .body_mut()
+            .read_json()
+            .context("Failed to parse releases")?;
+        Ok((releases, next_url))
+    })
+}
 
-    response
-        .body_mut()
-        .read_json()
-        .context("Failed to parse releases")
+fn collect_release_pages<F>(mut next_url: Option<String>, mut fetch_page: F) -> Result<Vec<Release>>
+where
+    F: FnMut(&str) -> Result<(Vec<Release>, Option<String>)>,
+{
+    let mut visited = HashSet::new();
+    let mut releases = Vec::new();
+
+    while let Some(url) = next_url {
+        if !visited.insert(url.clone()) {
+            bail!("GitHub returned a repeated releases pagination link");
+        }
+        let (mut page, following_url) = fetch_page(&url)?;
+        releases.append(&mut page);
+        next_url = following_url;
+    }
+
+    Ok(releases)
+}
+
+fn next_page_url(link_header: &str, endpoint: &str) -> Result<Option<String>> {
+    let Some(next_link) = link_header
+        .split(',')
+        .find(|link| link.contains("rel=\"next\""))
+    else {
+        return Ok(None);
+    };
+    let Some(url) = next_link.trim().split(';').next().and_then(|part| {
+        part.trim()
+            .strip_prefix('<')
+            .and_then(|part| part.strip_suffix('>'))
+    }) else {
+        bail!("GitHub returned a malformed releases pagination link");
+    };
+    if !url.starts_with(endpoint) {
+        bail!("GitHub returned an unexpected releases pagination URL");
+    }
+    Ok(Some(url.to_string()))
 }
 
 pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Result<Release> {
@@ -140,21 +195,28 @@ pub fn fetch_upgrade_release(
         return fetch_release_info(agent, repo, None);
     };
     let releases = list_releases(agent, repo)?;
-    let selected = releases
+    let selected = select_upgrade_release(releases, &cached_version);
+    match selected {
+        Some(release) => Ok(release),
+        None => bail!(
+            "No stable releases found for {repo} in the installed tag family '{}'; refusing to select an unrelated release",
+            cached_version.family
+        ),
+    }
+}
+
+fn select_upgrade_release(releases: Vec<Release>, cached_version: &TagVersion) -> Option<Release> {
+    releases
         .into_iter()
         .filter_map(|release| {
+            if release.prerelease || release.draft {
+                return None;
+            }
             let version = parse_tag_version(&release.tag_name)?;
             (version.family == cached_version.family).then_some((version, release))
         })
         .max_by_key(|(version, _)| version.parts)
-        .map(|(_, release)| release);
-    match selected {
-        Some(release) => Ok(release),
-        None => bail!(
-            "No releases found for {repo} in the installed tag family '{}'; refusing to select an unrelated release",
-            cached_version.family
-        ),
-    }
+        .map(|(_, release)| release)
 }
 
 /// Whether `target` is an older version in the same tag family as `installed`.
@@ -212,6 +274,8 @@ mod tests {
         let release = Release {
             tag_name: "v1.0.0".to_string(),
             assets: vec![],
+            prerelease: false,
+            draft: false,
         };
         assert_eq!(release.tag_name, "v1.0.0");
         assert!(release.assets.is_empty());
@@ -278,6 +342,55 @@ mod tests {
             "process-daemon-v0"
         );
         assert!(parse_tag_version("release-candidate").is_none());
+    }
+
+    #[test]
+    fn test_next_page_url_follows_github_next_link() {
+        let endpoint = "https://api.github.com/repos/owner/repo/releases?";
+        let link = "<https://api.github.com/repos/owner/repo/releases?per_page=100&page=2>; rel=\"next\", <https://api.github.com/repos/owner/repo/releases?per_page=100&page=4>; rel=\"last\"";
+        assert_eq!(
+            next_page_url(link, endpoint).unwrap().as_deref(),
+            Some("https://api.github.com/repos/owner/repo/releases?per_page=100&page=2")
+        );
+        assert_eq!(next_page_url("", endpoint).unwrap(), None);
+        assert!(next_page_url("<https://example.com/evil>; rel=\"next\"", endpoint).is_err());
+    }
+
+    #[test]
+    fn test_upgrade_selection_uses_later_page_and_skips_prereleases_and_drafts() {
+        let cached_version = parse_tag_version("v2.2.7").unwrap();
+        let page_one_url = "https://api.github.com/repos/owner/repo/releases?page=1";
+        let page_two_url = "https://api.github.com/repos/owner/repo/releases?page=2";
+        let releases = collect_release_pages(Some(page_one_url.to_string()), |url| {
+            if url == page_one_url {
+                Ok((
+                    vec![test_release("v2.2.8", false, false)],
+                    Some(page_two_url.to_string()),
+                ))
+            } else {
+                assert_eq!(url, page_two_url);
+                Ok((
+                    vec![
+                        test_release("v2.2.9", false, false),
+                        test_release("v2.3.0-rc.1", true, false),
+                        test_release("v2.4.0", false, true),
+                    ],
+                    None,
+                ))
+            }
+        })
+        .unwrap();
+        let selected = select_upgrade_release(releases, &cached_version).unwrap();
+        assert_eq!(selected.tag_name, "v2.2.9");
+    }
+
+    fn test_release(tag: &str, prerelease: bool, draft: bool) -> Release {
+        Release {
+            tag_name: tag.to_string(),
+            assets: vec![],
+            prerelease,
+            draft,
+        }
     }
 
     #[test]
