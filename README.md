@@ -317,7 +317,8 @@ cheapest-first:
    (one request). It is accepted only when it is stable, belongs to the
    installed tag family and is not older than the installed version; when it
    claims to be a newer version, GitHub's compare API must additionally
-   confirm that its tag is ahead of the installed one in git history.
+   confirm that its tag is ahead of the installed one in git history. A tag
+   the compare API contradicts is excluded from the fallback scan as well.
 2. **Bounded release scan**: the release list is walked newest-first and the
    walk stops once `stable_scan_limit` stable releases have been seen. The
    newest stable release in the installed tag family wins (across all
@@ -354,7 +355,7 @@ repository in `~/.grd/state.toml`:
   - `destination` is mandatory and records where the binary was installed.
   - `binary` records the installed filename (e.g. `fd.exe` on Windows). Entries written before `--rename` existed omit it; `grd remove` and `grd info` then fall back to the repo basename.
   - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
-  - An optional `stable_scan_limit` at the top level bounds the release-list walk used to resolve "latest" (see [Version Resolution](#version-resolution)); values below 1 fall back to the default of 20.
+  - An optional `stable_scan_limit` at the top level bounds the release-list walk used to resolve "latest" (see [Version Resolution](#version-resolution)); invalid values (below 1, negative, non-integer) fall back to the default of 20 instead of corrupting the state file.
   - Paths kept in the state file must be valid UTF-8, because the file itself is TOML. A `--destination` or a registered install directory whose bytes are not valid UTF-8 is rejected with an error instead of being stored mangled, which would point later installs at a different directory.
 
 ## Options

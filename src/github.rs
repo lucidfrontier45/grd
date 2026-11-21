@@ -309,7 +309,9 @@ pub fn fetch_install_release(agent: &Agent, repo: &str, scan_limit: usize) -> Re
 ///    owner-controlled label is trusted only when [`check_hint`] approves
 ///    the tag (stable, same tag family, not older than the install) and,
 ///    when it claims to be newer, [`compare_is_ahead`] confirms the tag
-///    is really ahead of the installed one in git history.
+///    is really ahead of the installed one in git history. A tag the
+///    compare API contradicts is excluded from the fallback scan too: as
+///    the family maximum it would otherwise be re-selected there.
 /// 2. **Bounded scan**: [`scan_recent_releases`] walks the release list
 ///    until `scan_limit` stable candidates have been seen, and
 ///    [`select_upgrade_release`] picks the newest in the installed tag
@@ -329,6 +331,7 @@ pub fn fetch_upgrade_release(
         return fetch_install_release(agent, repo, scan_limit);
     };
 
+    let mut vetoed_tag: Option<String> = None;
     if let Some(hint) = fetch_owner_latest(agent, repo)? {
         match check_hint(&hint, &cached_version) {
             HintCheck::Accept => return Ok(hint),
@@ -338,9 +341,10 @@ pub fn fetch_upgrade_release(
                     return Ok(hint);
                 }
                 eprintln!(
-                    "Note: '{}' is marked latest but is not ahead of '{cached_tag}' in git history; scanning releases instead",
+                    "Note: '{}' is marked latest but is not ahead of '{cached_tag}' in git history; ignoring it",
                     hint.tag_name
                 );
+                vetoed_tag = Some(hint.tag_name);
             }
             HintCheck::Reject => {
                 eprintln!(
@@ -352,7 +356,7 @@ pub fn fetch_upgrade_release(
     }
 
     let releases = scan_recent_releases(agent, repo, scan_limit)?;
-    let selected = select_upgrade_release(releases, &cached_version);
+    let selected = select_upgrade_from_scan(releases, &cached_version, vetoed_tag.as_deref());
     match selected {
         Some(release) => Ok(release),
         None => bail!(
@@ -461,6 +465,25 @@ fn select_latest_release(releases: Vec<Release>) -> Option<Release> {
                 .then_with(|| b.stream.cmp(&a.stream))
         })
         .map(|(_, release)| release)
+}
+
+/// Pick the upgrade target from a scanned pool, skipping a compare-vetoed
+/// tag. The vetoed hint is typically the family maximum, so excluding it
+/// lets the scan fall back to the next-newest release of the family
+/// instead of re-selecting the rejected one.
+fn select_upgrade_from_scan(
+    releases: Vec<Release>,
+    cached_version: &TagVersion,
+    vetoed_tag: Option<&str>,
+) -> Option<Release> {
+    let candidates = match vetoed_tag {
+        Some(tag) => releases
+            .into_iter()
+            .filter(|release| release.tag_name != tag)
+            .collect(),
+        None => releases,
+    };
+    select_upgrade_release(candidates, cached_version)
 }
 
 fn select_upgrade_release(releases: Vec<Release>, cached_version: &TagVersion) -> Option<Release> {
@@ -746,6 +769,33 @@ mod tests {
         .unwrap();
         assert_eq!(fetched, vec![page_one_url, page_two_url]);
         assert_eq!(releases.len(), 4);
+    }
+
+    #[test]
+    fn test_vetoed_hint_is_not_reselected_by_the_scan() {
+        let cached = parse_tag_version("v2.2.7").unwrap();
+        let pool = || {
+            vec![
+                test_release("v2.2.8", false, false), // vetoed hint: family maximum
+                test_release("v2.2.7", false, false),
+                test_release("v2.2.6", false, false),
+            ]
+        };
+        // Without a veto the scan picks the family maximum.
+        assert_eq!(
+            select_upgrade_from_scan(pool(), &cached, None)
+                .unwrap()
+                .tag_name,
+            "v2.2.8"
+        );
+        // A compare-vetoed tag must not come back through the scan: the
+        // next-newest release of the family wins instead.
+        assert_eq!(
+            select_upgrade_from_scan(pool(), &cached, Some("v2.2.8"))
+                .unwrap()
+                .tag_name,
+            "v2.2.7"
+        );
     }
 
     #[test]
