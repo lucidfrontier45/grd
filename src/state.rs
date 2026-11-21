@@ -1,8 +1,44 @@
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
+
+/// Write the state file without ever making it group/world readable.
+///
+/// Since the file can hold a GitHub PAT, an existing file is restricted to
+/// owner-only mode before its contents are replaced, and a new file is
+/// created with owner-only mode directly, so no wider mode is ever visible
+/// on disk — not even briefly.
+#[cfg(unix)]
+fn write_state_file(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    if path.exists() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content.as_bytes())
+}
+
+/// Non-Unix fallback: files under the user profile inherit ACLs that already
+/// exclude other standard users, and std exposes no ACL API.
+#[cfg(not(unix))]
+fn write_state_file(path: &Path, content: &str) -> std::io::Result<()> {
+    fs::write(path, content)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CachedRelease {
@@ -146,7 +182,7 @@ impl State {
             }
         };
 
-        if let Err(e) = fs::write(&path, content) {
+        if let Err(e) = write_state_file(&path, &content) {
             eprintln!("Warning: failed to write state file {:?}: {}", path, e);
         }
     }
@@ -586,6 +622,29 @@ destination = "/usr/local/bin"
             loaded.get_github_pat(),
             Some("ghp_0123456789abcdefghijklmnopqrstuv")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_state_file_is_owner_only_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        state.save();
+
+        let mode = fs::metadata(&state_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A pre-existing wider-mode file must be tightened on rewrite.
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644)).unwrap();
+        State::load().save();
+        let mode = fs::metadata(&state_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

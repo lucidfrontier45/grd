@@ -92,7 +92,7 @@ fn testing_env_var(_key: &str) -> Option<String> {
 /// Reject PAT values that are too short to be real tokens.
 pub fn validate_pat_format(token: &str) -> Result<()> {
     if token.len() < 20 {
-        bail!("GitHub PAT appears too short (expected 40+ characters)");
+        bail!("GitHub PAT appears too short (minimum 20 characters)");
     }
     Ok(())
 }
@@ -279,7 +279,8 @@ mod tests {
 
     #[test]
     fn test_validate_pat_format_rejects_short_tokens() {
-        assert!(validate_pat_format("short").is_err());
+        let err = validate_pat_format("short").unwrap_err().to_string();
+        assert!(err.contains("minimum 20 characters"), "got: {err}");
         assert!(validate_pat_format("ghp_0123456789abcdefghijklmnopqrstuv").is_ok());
     }
 }

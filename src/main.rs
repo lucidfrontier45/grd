@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::IsTerminal,
+    io::{BufRead, IsTerminal},
     path::{Path, PathBuf},
 };
 
@@ -117,8 +117,14 @@ fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
     let mut cache = state::State::load();
     match action {
         GithubPatAction::Set { token } => {
-            config::validate_pat_format(token)?;
-            cache.set_github_pat(token);
+            let token = match token {
+                Some(t) => t.clone(),
+                // No positional: read the token from stdin so it can be
+                // piped without landing in shell history or argv.
+                None => read_token_from_stdin()?,
+            };
+            config::validate_pat_format(&token)?;
+            cache.set_github_pat(&token);
             cache.save();
             println!("GitHub PAT saved to the settings file");
         }
@@ -133,6 +139,24 @@ fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read a PAT from stdin (a single line, trimmed) when `set` is called
+/// without a positional token.
+fn read_token_from_stdin() -> Result<String> {
+    read_token_from_reader(&mut std::io::stdin().lock())
+}
+
+fn read_token_from_reader(input: &mut impl BufRead) -> Result<String> {
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .context("failed to read token from stdin")?;
+    let token = line.trim().to_string();
+    if token.is_empty() {
+        bail!("no token provided; pass it as an argument or pipe it to stdin");
+    }
+    Ok(token)
 }
 
 /// `grd remove`: delete the installed binary and its cache entry.
@@ -214,16 +238,17 @@ fn cmd_list_platform() -> Result<()> {
 
 /// The install pipeline for the no-subcommand path.
 fn run_install(args: &Args) -> Result<()> {
-    let dest = resolve_dest(args)?;
-    let (agent, repo) = prepare_request(args)?;
+    // One load feeds the destination, the auth token and the cached tag;
+    // `install_release` reloads on its own after the download completes.
+    let state = state::State::load();
+    let dest = resolve_dest(args, &state)?;
+    let (agent, repo) = prepare_request(args, state.get_github_pat())?;
 
     if args.list {
         return list_available_releases(&agent, repo);
     }
 
-    let cached_tag = state::State::load()
-        .get_cached(repo)
-        .map(|cached| cached.tag.clone());
+    let cached_tag = state.get_cached(repo).map(|cached| cached.tag.clone());
     let release = match args.tag.as_deref() {
         Some(tag) => github::fetch_release_info(&agent, repo, Some(tag))?,
         None => github::fetch_upgrade_release(&agent, repo, cached_tag.as_deref())?,
@@ -256,10 +281,10 @@ fn run_install(args: &Args) -> Result<()> {
 
 /// Destination directory: `--destination`, else the registered default, else
 /// the platform default. Created unless `--dry-run`.
-fn resolve_dest(args: &Args) -> Result<PathBuf> {
+fn resolve_dest(args: &Args, state: &state::State) -> Result<PathBuf> {
     let dest = match &args.destination {
         Some(d) => d.clone(),
-        None => state::State::load()
+        None => state
             .get_default_install_dir()
             .map(PathBuf::from)
             .unwrap_or_else(state::State::default_install_path),
@@ -273,10 +298,8 @@ fn resolve_dest(args: &Args) -> Result<PathBuf> {
 /// Build the API client and pass the remaining local validations before any
 /// network work: a rejected value must not cost the user a release lookup or
 /// an asset download.
-fn prepare_request(args: &Args) -> Result<(Agent, &str)> {
+fn prepare_request<'a>(args: &'a Args, file_pat: Option<&str>) -> Result<(Agent, &'a str)> {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let state = state::State::load();
-    let file_pat = state.get_github_pat();
     let token = config::get_auth_token(file_pat);
     let agent = config::configure_agent(&ua, token.as_deref());
 
@@ -567,6 +590,22 @@ fn dry_run_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_read_token_from_reader_trims_input() {
+        let mut input = std::io::Cursor::new("ghp_token_value\n");
+        assert_eq!(
+            read_token_from_reader(&mut input).unwrap(),
+            "ghp_token_value"
+        );
+    }
+
+    #[test]
+    fn test_read_token_from_reader_rejects_empty_line() {
+        let mut input = std::io::Cursor::new("\n");
+        let err = read_token_from_reader(&mut input).unwrap_err().to_string();
+        assert!(err.contains("no token provided"), "got: {err}");
+    }
 
     #[test]
     fn test_validate_rename_accepts_plain_filenames() {

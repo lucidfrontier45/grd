@@ -111,8 +111,8 @@ pub enum ConfigCommand {
 pub enum GithubPatAction {
     /// Store a GitHub PAT in the state file
     Set {
-        /// GitHub personal access token
-        token: String,
+        /// GitHub personal access token; read from stdin when omitted
+        token: Option<String>,
     },
     /// Remove the stored GitHub PAT
     Unset,
@@ -292,7 +292,22 @@ mod tests {
         else {
             panic!("expected 'config github_pat set'");
         };
-        assert_eq!(token, "ghp_example");
+        assert_eq!(token.as_deref(), Some("ghp_example"));
+    }
+
+    #[test]
+    fn test_config_github_pat_set_token_optional_for_stdin() {
+        let args = Args::parse_from(["grd", "config", "github_pat", "set"]);
+        let Some(Command::Config {
+            command:
+                ConfigCommand::GithubPat {
+                    action: GithubPatAction::Set { token },
+                },
+        }) = args.command
+        else {
+            panic!("expected 'config github_pat set'");
+        };
+        assert_eq!(token, None);
     }
 
     #[test]

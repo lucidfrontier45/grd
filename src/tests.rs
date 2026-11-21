@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use crate::{
     asset::{Selection, find_asset},
     cli::{Args, Command},
-    config::{configure_agent, get_auth_token},
+    config::{configure_agent, get_auth_token, resolve_auth_token},
     download::{DownloadSource, download_asset},
     extract::extract_and_save,
     github::fetch_release_info,
@@ -330,21 +330,25 @@ fn with_state_path(dir: &TempDir, f: impl FnOnce()) {
 }
 
 #[test]
-fn test_get_auth_token_reads_github_pat_from_state_file() {
+fn test_github_pat_read_back_from_state_file() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
         state.set_github_pat("ghp_from_state_file_0123456789abcdef");
         state.save();
 
-        // Environment variables take precedence over the state file, so the
-        // stored value is only observable when no env token is configured.
-        if env::var_os("GITHUB_PAT").is_none() && env::var_os("GITHUB_TOKEN").is_none() {
-            assert_eq!(
-                get_auth_token(State::load().get_github_pat()).as_deref(),
-                Some("ghp_from_state_file_0123456789abcdef")
-            );
-        }
+        assert_eq!(
+            State::load().get_github_pat(),
+            Some("ghp_from_state_file_0123456789abcdef")
+        );
+        // resolve_auth_token with a None env side sidesteps GITHUB_PAT and
+        // GITHUB_TOKEN entirely, so the assertion runs even when a
+        // contributor exports a token; the env-wins half is covered by the
+        // resolve_auth_token unit tests in config.rs.
+        assert_eq!(
+            resolve_auth_token(None, State::load().get_github_pat()).as_deref(),
+            Some("ghp_from_state_file_0123456789abcdef")
+        );
     });
 }
 

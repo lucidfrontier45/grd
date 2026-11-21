@@ -68,12 +68,19 @@ Variables that are already set in the environment are **not** overridden. The
 Store the token persistently with the [`config`](#config) subcommand:
 
 ```bash
+# Token read from stdin — keeps it out of shell history and process listings:
+echo "your_token_here" | grd config github_pat set
+# or paste interactively:
+grd config github_pat set
+# or pass it directly (lands in shell history and is visible in process listings):
 grd config github_pat set your_token_here
+
 grd config github_pat unset
 ```
 
-The token is stored in plaintext in `~/.grd/state.toml`. Environment variables
-(`GITHUB_PAT`, then `GITHUB_TOKEN`) take precedence over the stored value.
+The token is stored in plaintext in `~/.grd/state.toml` (owner-readable only
+on Unix). Environment variables (`GITHUB_PAT`, then `GITHUB_TOKEN`) take
+precedence over the stored value.
 
 ## Subcommands
 
@@ -128,11 +135,15 @@ Manage settings persisted in the state file (`~/.grd/state.toml`):
 
 ```bash
 # Store a GitHub PAT (used when GITHUB_PAT/GITHUB_TOKEN is not set)
-grd config github_pat set your_token_here
+echo "your_token_here" | grd config github_pat set
 
 # Remove the stored GitHub PAT
 grd config github_pat unset
 ```
+
+Passing the token as a direct argument is also supported, but it lands in
+shell history and is briefly visible in process listings; piping it via stdin
+is safer.
 
 ## Basic Commands
 
