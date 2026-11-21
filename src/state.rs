@@ -190,6 +190,10 @@ impl State {
         self.default_install_dir = Some(path.to_string());
     }
 
+    pub fn clear_default_install_dir(&mut self) {
+        self.default_install_dir = None;
+    }
+
     pub fn get_github_pat(&self) -> Option<&str> {
         self.github_pat.as_deref()
     }
@@ -540,6 +544,15 @@ destination = "/usr/local/bin"
         let mut state = State::default();
         state.set_default_install_dir("/usr/local/bin");
         assert_eq!(state.default_install_dir.as_deref(), Some("/usr/local/bin"));
+    }
+
+    #[test]
+    fn test_clear_default_install_dir() {
+        let mut state = State::default();
+        state.set_default_install_dir("/usr/local/bin");
+        state.clear_default_install_dir();
+        assert_eq!(state.default_install_dir, None);
+        assert_eq!(state.get_default_install_dir(), None);
     }
 
     #[test]

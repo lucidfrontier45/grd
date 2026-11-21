@@ -104,6 +104,24 @@ pub enum ConfigCommand {
         #[command(subcommand)]
         action: GithubPatAction,
     },
+    /// Manage the default install directory (same effect as `register`)
+    #[command(name = "install_dir")]
+    InstallDir {
+        #[command(subcommand)]
+        action: InstallDirAction,
+    },
+}
+
+/// Actions on the `install_dir` setting.
+#[derive(Subcommand, Debug)]
+pub enum InstallDirAction {
+    /// Store the default install directory in the state file
+    Set {
+        /// Default installation path
+        path: PathBuf,
+    },
+    /// Remove the stored default install directory
+    Unset,
 }
 
 /// Actions on the `github_pat` setting.
@@ -321,6 +339,41 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[test]
+    fn test_config_install_dir_set_parses() {
+        let args = Args::parse_from(["grd", "config", "install_dir", "set", "/opt/bin"]);
+        let Some(Command::Config {
+            command:
+                ConfigCommand::InstallDir {
+                    action: InstallDirAction::Set { path },
+                },
+        }) = args.command
+        else {
+            panic!("expected 'config install_dir set'");
+        };
+        assert_eq!(path, PathBuf::from("/opt/bin"));
+    }
+
+    #[test]
+    fn test_config_install_dir_unset_parses() {
+        let args = Args::parse_from(["grd", "config", "install_dir", "unset"]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Config {
+                command: ConfigCommand::InstallDir {
+                    action: InstallDirAction::Unset,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_config_install_dir_set_requires_a_path() {
+        let err = Args::try_parse_from(["grd", "config", "install_dir", "set"])
+            .expect_err("missing path must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]
