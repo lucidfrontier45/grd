@@ -17,7 +17,7 @@ use crate::{
 #[test]
 fn test_select_asset_from_real_repo() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = get_auth_token();
+    let token = get_auth_token(None);
     let agent = configure_agent(&ua, token.as_deref());
 
     let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
@@ -37,7 +37,7 @@ fn test_select_asset_from_real_repo() {
 #[test]
 fn test_fd_real_repo_linux_x86_64_no_arm_artifact() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = get_auth_token();
+    let token = get_auth_token(None);
     let agent = configure_agent(&ua, token.as_deref());
 
     let release = fetch_release_info(&agent, "sharkdp/fd", Some("v10.4.2")).unwrap();
@@ -79,7 +79,7 @@ fn test_fd_real_repo_linux_x86_64_no_arm_artifact() {
 #[test]
 fn test_integration_download_extract_save() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = get_auth_token();
+    let token = get_auth_token(None);
     let agent = configure_agent(&ua, token.as_deref());
 
     let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
@@ -126,7 +126,7 @@ fn test_integration_download_extract_save() {
 #[test]
 fn test_integration_download_extract_save_renamed() {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = get_auth_token();
+    let token = get_auth_token(None);
     let agent = configure_agent(&ua, token.as_deref());
 
     let release = fetch_release_info(&agent, "BurntSushi/ripgrep", Some("15.1.0")).unwrap();
@@ -327,6 +327,25 @@ fn with_state_path(dir: &TempDir, f: impl FnOnce()) {
     unsafe {
         env::remove_var("GRD_STATE_PATH");
     }
+}
+
+#[test]
+fn test_get_auth_token_reads_github_pat_from_state_file() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_github_pat("ghp_from_state_file_0123456789abcdef");
+        state.save();
+
+        // Environment variables take precedence over the state file, so the
+        // stored value is only observable when no env token is configured.
+        if env::var_os("GITHUB_PAT").is_none() && env::var_os("GITHUB_TOKEN").is_none() {
+            assert_eq!(
+                get_auth_token(State::load().get_github_pat()).as_deref(),
+                Some("ghp_from_state_file_0123456789abcdef")
+            );
+        }
+    });
 }
 
 #[test]

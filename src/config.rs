@@ -11,8 +11,15 @@ fn load_pat_from_env() -> Option<String> {
     env::var("GITHUB_PAT")
         .ok()
         .or_else(|| env::var("GITHUB_TOKEN").ok())
-        .or_else(|| testing_env_var("GITHUB_PAT"))
-        .or_else(|| testing_env_var("GITHUB_TOKEN"))
+}
+
+fn load_testing_pat() -> Option<String> {
+    testing_env_var("GITHUB_PAT").or_else(|| testing_env_var("GITHUB_TOKEN"))
+}
+
+/// Pick the PAT source: the environment overrides the state file.
+pub fn resolve_auth_token(env_pat: Option<String>, file_pat: Option<&str>) -> Option<String> {
+    env_pat.or_else(|| file_pat.map(str::to_string))
 }
 
 /// Parse a dotenv-style file and return the variables it defines.
@@ -82,32 +89,31 @@ fn testing_env_var(_key: &str) -> Option<String> {
     None
 }
 
-fn validate_pat_format(token: &str) -> Result<()> {
+/// Reject PAT values that are too short to be real tokens.
+pub fn validate_pat_format(token: &str) -> Result<()> {
     if token.len() < 20 {
         bail!("GitHub PAT appears too short (expected 40+ characters)");
     }
     Ok(())
 }
 
-/// Get the GitHub Personal Access Token (PAT) from environment variables.
+/// Get the GitHub Personal Access Token (PAT) to authenticate API requests.
 ///
-/// This function checks for the `GITHUB_PAT` environment variable first, then falls back to
-/// `GITHUB_TOKEN`. No file is read automatically; use `--env-file` to populate the
-/// environment from a dotenv-style file before this runs.
+/// Resolution order: the `GITHUB_PAT` environment variable, then `GITHUB_TOKEN`,
+/// then the `github_pat` value from the state file passed as `file_pat`, then
+/// (test builds only) `testing.env`. Use `--env-file` to populate the environment
+/// from a dotenv-style file before this runs.
 ///
-/// Returns `Some(token)` if a valid token is found, or `None` if no token is configured
-/// or if the token format validation fails.
-pub fn get_auth_token() -> Option<String> {
-    if let Some(token) = load_pat_from_env() {
-        if let Err(e) = validate_pat_format(&token) {
-            eprintln!("Warning: {}", e);
-            eprintln!("Proceeding without authentication");
-            return None;
-        }
-        Some(token)
-    } else {
-        None
+/// Returns `Some(token)` if a valid token is found, or `None` if no token is
+/// configured or if the token format validation fails.
+pub fn get_auth_token(file_pat: Option<&str>) -> Option<String> {
+    let token = resolve_auth_token(load_pat_from_env(), file_pat).or_else(load_testing_pat)?;
+    if let Err(e) = validate_pat_format(&token) {
+        eprintln!("Warning: {}", e);
+        eprintln!("Proceeding without authentication");
+        return None;
     }
+    Some(token)
 }
 
 /// Create a configured ureq Agent with the specified user agent and optional PAT authentication.
@@ -252,5 +258,28 @@ mod tests {
         assert_eq!(auth_header, format!("Bearer {}", token));
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn test_resolve_auth_token_env_wins_over_file() {
+        let token = resolve_auth_token(Some("env-token".to_string()), Some("file-token"));
+        assert_eq!(token.as_deref(), Some("env-token"));
+    }
+
+    #[test]
+    fn test_resolve_auth_token_falls_back_to_file() {
+        let token = resolve_auth_token(None, Some("file-token"));
+        assert_eq!(token.as_deref(), Some("file-token"));
+    }
+
+    #[test]
+    fn test_resolve_auth_token_none_when_unconfigured() {
+        assert_eq!(resolve_auth_token(None, None), None);
+    }
+
+    #[test]
+    fn test_validate_pat_format_rejects_short_tokens() {
+        assert!(validate_pat_format("short").is_err());
+        assert!(validate_pat_format("ghp_0123456789abcdefghijklmnopqrstuv").is_ok());
     }
 }

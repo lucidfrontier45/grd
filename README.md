@@ -63,6 +63,18 @@ grd --env-file .env owner/repo
 Variables that are already set in the environment are **not** overridden. The
 `GITHUB_PAT` variable takes precedence over `GITHUB_TOKEN`.
 
+**Using the settings file:**
+
+Store the token persistently with the [`config`](#config) subcommand:
+
+```bash
+grd config github_pat set your_token_here
+grd config github_pat unset
+```
+
+The token is stored in plaintext in `~/.grd/state.toml`. Environment variables
+(`GITHUB_PAT`, then `GITHUB_TOKEN`) take precedence over the stored value.
+
 ## Subcommands
 
 ### `register`
@@ -108,6 +120,18 @@ List supported platform targets (OS/arch combinations):
 
 ```bash
 grd list-platform
+```
+
+### `config`
+
+Manage settings persisted in the state file (`~/.grd/state.toml`):
+
+```bash
+# Store a GitHub PAT (used when GITHUB_PAT/GITHUB_TOKEN is not set)
+grd config github_pat set your_token_here
+
+# Remove the stored GitHub PAT
+grd config github_pat unset
 ```
 
 ## Basic Commands

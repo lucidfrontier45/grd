@@ -40,6 +40,11 @@ pub struct State {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_install_dir: Option<String>,
+
+    /// GitHub personal access token used when neither `GITHUB_PAT` nor
+    /// `GITHUB_TOKEN` is set in the environment. Stored in plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_pat: Option<String>,
 }
 
 impl State {
@@ -160,6 +165,18 @@ impl State {
 
     pub fn set_default_install_dir(&mut self, path: &str) {
         self.default_install_dir = Some(path.to_string());
+    }
+
+    pub fn get_github_pat(&self) -> Option<&str> {
+        self.github_pat.as_deref()
+    }
+
+    pub fn set_github_pat(&mut self, token: &str) {
+        self.github_pat = Some(token.to_string());
+    }
+
+    pub fn clear_github_pat(&mut self) {
+        self.github_pat = None;
     }
 
     pub fn set_cached(
@@ -534,6 +551,53 @@ destination = "/usr/local/bin"
         state.set_default_install_dir("/tmp");
         let content = toml::to_string_pretty(&state).unwrap();
         assert!(content.contains("default_install_dir"));
+    }
+
+    #[test]
+    fn test_github_pat_defaults_to_none() {
+        let state = State::default();
+        assert_eq!(state.get_github_pat(), None);
+    }
+
+    #[test]
+    fn test_set_and_clear_github_pat() {
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        assert_eq!(
+            state.get_github_pat(),
+            Some("ghp_0123456789abcdefghijklmnopqrstuv")
+        );
+        state.clear_github_pat();
+        assert_eq!(state.get_github_pat(), None);
+    }
+
+    #[test]
+    fn test_github_pat_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        state.save();
+
+        let loaded = State::load();
+        assert_eq!(
+            loaded.get_github_pat(),
+            Some("ghp_0123456789abcdefghijklmnopqrstuv")
+        );
+    }
+
+    #[test]
+    fn test_github_pat_serialized_only_when_set() {
+        let state = State::default();
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(!content.contains("github_pat"));
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(content.contains("github_pat"));
     }
 
     #[test]

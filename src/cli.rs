@@ -88,6 +88,34 @@ pub enum Command {
     ListInstalled,
     /// List supported platforms
     ListPlatform,
+    /// Manage settings stored in the state file
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+/// Settings manageable through `grd config`.
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Manage the GitHub personal access token used for API requests
+    #[command(name = "github_pat")]
+    GithubPat {
+        #[command(subcommand)]
+        action: GithubPatAction,
+    },
+}
+
+/// Actions on the `github_pat` setting.
+#[derive(Subcommand, Debug)]
+pub enum GithubPatAction {
+    /// Store a GitHub PAT in the state file
+    Set {
+        /// GitHub personal access token
+        token: String,
+    },
+    /// Remove the stored GitHub PAT
+    Unset,
 }
 
 #[cfg(test)]
@@ -250,5 +278,40 @@ mod tests {
         let args = Args::parse_from(["grd", "--env-file", "secrets.env", "list-installed"]);
         assert_eq!(args.env_file, Some(PathBuf::from("secrets.env")));
         assert!(matches!(args.command, Some(Command::ListInstalled)));
+    }
+
+    #[test]
+    fn test_config_github_pat_set_parses() {
+        let args = Args::parse_from(["grd", "config", "github_pat", "set", "ghp_example"]);
+        let Some(Command::Config {
+            command:
+                ConfigCommand::GithubPat {
+                    action: GithubPatAction::Set { token },
+                },
+        }) = args.command
+        else {
+            panic!("expected 'config github_pat set'");
+        };
+        assert_eq!(token, "ghp_example");
+    }
+
+    #[test]
+    fn test_config_github_pat_unset_parses() {
+        let args = Args::parse_from(["grd", "config", "github_pat", "unset"]);
+        assert!(matches!(
+            args.command,
+            Some(Command::Config {
+                command: ConfigCommand::GithubPat {
+                    action: GithubPatAction::Unset,
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_config_github_pat_rejects_unknown_action() {
+        let err = Args::try_parse_from(["grd", "config", "github_pat", "bogus"])
+            .expect_err("unknown action must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
     }
 }

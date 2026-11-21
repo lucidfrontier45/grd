@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use grd::{
     asset,
-    cli::{Args, Command},
+    cli::{Args, Command, ConfigCommand, GithubPatAction},
     config, confirm_upgrade, download, extract, github, naming, state,
 };
 use ureq::Agent;
@@ -89,6 +89,7 @@ fn run_command(command: &Command) -> Result<()> {
         Command::Info { repo } => cmd_info(repo),
         Command::ListInstalled => cmd_list_installed(),
         Command::ListPlatform => cmd_list_platform(),
+        Command::Config { command } => cmd_config(command),
     }
 }
 
@@ -99,6 +100,38 @@ fn cmd_register(path: &Path) -> Result<()> {
     cache.set_default_install_dir(&path_str);
     cache.save();
     println!("Default install directory set to: {}", path.display());
+    Ok(())
+}
+
+/// `grd config`: manage settings stored in the state file.
+fn cmd_config(command: &ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::GithubPat { action } => cmd_github_pat(action),
+    }
+}
+
+/// `grd config github_pat set <token>` / `grd config github_pat unset`:
+/// store or remove the GitHub PAT. Environment variables still take
+/// precedence over the stored value; the token is never echoed back.
+fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
+    let mut cache = state::State::load();
+    match action {
+        GithubPatAction::Set { token } => {
+            config::validate_pat_format(token)?;
+            cache.set_github_pat(token);
+            cache.save();
+            println!("GitHub PAT saved to the settings file");
+        }
+        GithubPatAction::Unset => {
+            if cache.get_github_pat().is_some() {
+                cache.clear_github_pat();
+                cache.save();
+                println!("GitHub PAT removed from the settings file");
+            } else {
+                eprintln!("Warning: no GitHub PAT stored — nothing to unset.");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -242,7 +275,9 @@ fn resolve_dest(args: &Args) -> Result<PathBuf> {
 /// an asset download.
 fn prepare_request(args: &Args) -> Result<(Agent, &str)> {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = config::get_auth_token();
+    let state = state::State::load();
+    let file_pat = state.get_github_pat();
+    let token = config::get_auth_token(file_pat);
     let agent = config::configure_agent(&ua, token.as_deref());
 
     let repo = args

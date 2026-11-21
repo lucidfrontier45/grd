@@ -1149,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_score_places_musl_first() {
-        let assets = vec![
+        let assets = [
             Asset {
                 name: "app-x86_64-unknown-linux-gnu.tar.gz".to_string(),
                 browser_download_url: "https://example.com/app-gnu.tar.gz".to_string(),
@@ -1372,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_score_places_zip_first_on_tie() {
-        let assets = vec![
+        let assets = [
             Asset {
                 name: "app-x86_64-linux.tar.gz".to_string(),
                 browser_download_url: "https://example.com/app.tar.gz".to_string(),
