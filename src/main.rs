@@ -144,6 +144,11 @@ fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
 /// Read a PAT from stdin (a single line, trimmed) when `set` is called
 /// without a positional token.
 fn read_token_from_stdin() -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        // Prompt on stderr so piped invocations stay clean while
+        // interactive users see that input is expected.
+        eprint!("Paste token: ");
+    }
     read_token_from_reader(&mut std::io::stdin().lock())
 }
 
