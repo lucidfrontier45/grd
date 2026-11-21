@@ -577,6 +577,38 @@ fn test_register_subcommand_persists_to_state() {
 }
 
 #[test]
+fn test_install_dir_set_persists_to_state() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        // Same setting that "grd register /custom/path" writes, reached via
+        // "grd config install_dir set /custom/path".
+        let mut state = State::default();
+        state.set_default_install_dir("/custom/path");
+        state.save().unwrap();
+
+        let loaded = State::load();
+        assert_eq!(loaded.get_default_install_dir(), Some("/custom/path"));
+    });
+}
+
+#[test]
+fn test_install_dir_unset_clears_state() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        let mut state = State::default();
+        state.set_default_install_dir("/custom/path");
+        state.save().unwrap();
+
+        // "grd config install_dir unset" only clears when a value exists.
+        let mut loaded = State::load();
+        loaded.clear_default_install_dir();
+        loaded.save().unwrap();
+
+        assert_eq!(State::load().get_default_install_dir(), None);
+    });
+}
+
+#[test]
 fn test_destination_falls_back_to_registered_dir() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {

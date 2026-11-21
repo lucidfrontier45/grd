@@ -92,6 +92,9 @@ Set a default install directory for future downloads (persisted in state cache):
 grd register /usr/local/bin
 ```
 
+Equivalent to `grd config install_dir set /usr/local/bin`; clear it again with
+`grd config install_dir unset`.
+
 ### `info`
 
 Show detailed information about an installed package (from cache):
@@ -139,6 +142,12 @@ echo "your_token_here" | grd config github_pat set
 
 # Remove the stored GitHub PAT
 grd config github_pat unset
+
+# Set the default install directory (same as `grd register <path>`)
+grd config install_dir set /usr/local/bin
+
+# Remove the stored default install directory
+grd config install_dir unset
 ```
 
 Passing the token as a direct argument is also supported, but it lands in

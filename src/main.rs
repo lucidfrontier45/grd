@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use grd::{
     asset,
-    cli::{Args, Command, ConfigCommand, GithubPatAction},
+    cli::{Args, Command, ConfigCommand, GithubPatAction, InstallDirAction},
     config, confirm_upgrade, download, extract, github, naming, state,
 };
 use ureq::Agent;
@@ -94,20 +94,43 @@ fn run_command(command: &Command) -> Result<()> {
 }
 
 /// `grd register`: remember the default install directory.
+/// A thin alias over `grd config install_dir set`.
 fn cmd_register(path: &Path) -> Result<()> {
-    let mut cache = state::State::load();
-    let path_str = path.display().to_string();
-    cache.set_default_install_dir(&path_str);
-    cache.save()?;
-    println!("Default install directory set to: {}", path.display());
-    Ok(())
+    cmd_install_dir(&InstallDirAction::Set {
+        path: path.to_path_buf(),
+    })
 }
 
 /// `grd config`: manage settings stored in the state file.
 fn cmd_config(command: &ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::GithubPat { action } => cmd_github_pat(action),
+        ConfigCommand::InstallDir { action } => cmd_install_dir(action),
     }
+}
+
+/// `grd config install_dir set <path>` / `grd config install_dir unset`:
+/// store or remove the default install directory — the same setting that
+/// `grd register <path>` writes.
+fn cmd_install_dir(action: &InstallDirAction) -> Result<()> {
+    let mut cache = state::State::load();
+    match action {
+        InstallDirAction::Set { path } => {
+            cache.set_default_install_dir(&path.display().to_string());
+            cache.save()?;
+            println!("Default install directory set to: {}", path.display());
+        }
+        InstallDirAction::Unset => {
+            if cache.get_default_install_dir().is_some() {
+                cache.clear_default_install_dir();
+                cache.save()?;
+                println!("Default install directory removed from the settings file");
+            } else {
+                eprintln!("Warning: no default install directory stored — nothing to unset.");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `grd config github_pat set <token>` / `grd config github_pat unset`:
