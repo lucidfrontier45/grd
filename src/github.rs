@@ -360,8 +360,36 @@ pub fn fetch_upgrade_release(
     match selected {
         Some(release) => Ok(release),
         None => bail!(
-            "No stable release in the installed tag family '{}' within the latest {scan_limit} stable releases of {repo}; refusing to select an unrelated release. Raise stable_scan_limit in the settings file to scan further",
-            cached_version.family
+            "{}",
+            scan_exhausted_message(
+                repo,
+                &cached_version.family,
+                cached_tag,
+                scan_limit,
+                vetoed_tag.as_deref(),
+            )
+        ),
+    }
+}
+
+/// The error for a bounded scan that ended without a usable release of
+/// the installed tag family. The advice differs with the veto: a
+/// compare-vetoed tag ([`select_upgrade_from_scan`]) stays excluded
+/// however wide the scan window grows, so raising `stable_scan_limit`
+/// cannot bring it back — pinning the release with `--tag` is the way out.
+fn scan_exhausted_message(
+    repo: &str,
+    family: &str,
+    cached_tag: &str,
+    scan_limit: usize,
+    vetoed_tag: Option<&str>,
+) -> String {
+    match vetoed_tag {
+        Some(tag) => format!(
+            "No usable stable release in the installed tag family '{family}' of {repo}: the owner-marked latest '{tag}' is not ahead of '{cached_tag}' in git history and the latest {scan_limit} stable releases contain no other release of that family; refusing to select an unrelated release. Use --tag to install a specific version"
+        ),
+        None => format!(
+            "No stable release in the installed tag family '{family}' within the latest {scan_limit} stable releases of {repo}; refusing to select an unrelated release. Raise stable_scan_limit in the settings file to scan further"
         ),
     }
 }
@@ -796,6 +824,21 @@ mod tests {
                 .tag_name,
             "v2.2.7"
         );
+    }
+
+    #[test]
+    fn test_scan_exhausted_message_advice_matches_the_veto() {
+        // Without a veto, widening the scan window is the way forward.
+        let plain = scan_exhausted_message("owner/repo", "v2", "v2.2.7", 20, None);
+        assert!(plain.contains("Raise stable_scan_limit"));
+
+        // With a compare-vetoed tag the window cannot grow past the veto:
+        // name the skipped tag and advise --tag, never a wider scan.
+        let vetoed = scan_exhausted_message("owner/repo", "v2", "v2.2.7", 20, Some("v2.3.0"));
+        assert!(vetoed.contains("'v2.3.0'"));
+        assert!(vetoed.contains("not ahead of 'v2.2.7'"));
+        assert!(vetoed.contains("--tag"));
+        assert!(!vetoed.contains("Raise stable_scan_limit"));
     }
 
     #[test]
