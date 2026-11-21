@@ -335,7 +335,7 @@ fn test_github_pat_read_back_from_state_file() {
     with_state_path(&dir, || {
         let mut state = State::default();
         state.set_github_pat("ghp_from_state_file_0123456789abcdef");
-        state.save();
+        state.save().unwrap();
 
         assert_eq!(
             State::load().get_github_pat(),
@@ -353,6 +353,32 @@ fn test_github_pat_read_back_from_state_file() {
 }
 
 #[test]
+fn test_save_returns_err_when_state_dir_cannot_be_created() {
+    let dir = TempDir::new().unwrap();
+    with_state_path(&dir, || {
+        // A plain file blocks the state directory from being created, so
+        // save() must fail instead of silently losing the write.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        unsafe {
+            // Safety: with_state_path holds the env lock for GRD_STATE_PATH.
+            env::set_var("GRD_STATE_PATH", blocker.join("state.toml"));
+        }
+
+        let state = State::default();
+        let result = state.save();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to create state directory"),
+            "expected directory-creation failure"
+        );
+    });
+}
+
+#[test]
 fn test_remove_deletes_file_and_state_entry() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
@@ -364,7 +390,7 @@ fn test_remove_deletes_file_and_state_entry() {
             dir.path().display().to_string(),
             if cfg!(windows) { "repo.exe" } else { "repo" },
         );
-        state.save();
+        state.save().unwrap();
 
         let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
         let binary_path = dir.path().join(bin_name);
@@ -375,7 +401,7 @@ fn test_remove_deletes_file_and_state_entry() {
         let dest = entry.destination;
         let target = std::path::PathBuf::from(&dest).join(bin_name);
         std::fs::remove_file(&target).unwrap();
-        cache.save();
+        cache.save().unwrap();
 
         assert!(!binary_path.exists());
         let loaded = State::load();
@@ -395,7 +421,7 @@ fn test_remove_warns_when_binary_missing() {
             dir.path().display().to_string(),
             if cfg!(windows) { "repo.exe" } else { "repo" },
         );
-        state.save();
+        state.save().unwrap();
 
         let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
         let binary_path = dir.path().join(bin_name);
@@ -409,7 +435,7 @@ fn test_remove_warns_when_binary_missing() {
         if target.exists() {
             std::fs::remove_file(&target).unwrap();
         }
-        cache.save();
+        cache.save().unwrap();
 
         assert!(!binary_path.exists());
         let loaded = State::load();
@@ -431,7 +457,7 @@ fn test_remove_uses_recorded_renamed_filename() {
             dir.path().display().to_string(),
             "custom-name",
         );
-        state.save();
+        state.save().unwrap();
 
         let renamed_path = dir.path().join("custom-name");
         std::fs::write(&renamed_path, "dummy").unwrap();
@@ -444,7 +470,7 @@ fn test_remove_uses_recorded_renamed_filename() {
         let target = std::path::PathBuf::from(&entry.destination).join(&filename);
         assert!(target.exists(), "recorded filename should resolve on disk");
         std::fs::remove_file(&target).unwrap();
-        cache.save();
+        cache.save().unwrap();
 
         assert!(!renamed_path.exists());
         assert!(State::load().get_cached("test/repo").is_none());
@@ -512,7 +538,7 @@ fn test_list_installed_displays_installed_packages() {
             "",
         );
         state.set_cached("other/app", "bar-macos.zip", "v2.3.1", String::new(), "");
-        state.save();
+        state.save().unwrap();
 
         let cache = State::load();
         assert_eq!(cache.versions.len(), 2);
@@ -543,7 +569,7 @@ fn test_register_subcommand_persists_to_state() {
         // Simulate what main.rs does on "grd register /custom/path"
         let mut state = State::default();
         state.set_default_install_dir("/custom/path");
-        state.save();
+        state.save().unwrap();
 
         let loaded = State::load();
         assert_eq!(loaded.get_default_install_dir(), Some("/custom/path"));
@@ -556,7 +582,7 @@ fn test_destination_falls_back_to_registered_dir() {
     with_state_path(&dir, || {
         let mut state = State::default();
         state.set_default_install_dir("/registered/path");
-        state.save();
+        state.save().unwrap();
 
         // When --destination is None, the fallback logic should pick up the registered dir
         let dest = None::<std::path::PathBuf>;
@@ -597,7 +623,7 @@ fn test_list_installed_does_not_modify_state() {
     with_state_path(&dir, || {
         let mut state = State::default();
         state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
-        state.save();
+        state.save().unwrap();
 
         let before = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
 
@@ -629,7 +655,7 @@ fn test_tag_cache_hit_conditions_met() {
             dest.to_str().unwrap().to_string(),
             if cfg!(windows) { "repo.exe" } else { "repo" },
         );
-        state.save();
+        state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
         assert!(!args.force);
@@ -666,7 +692,7 @@ fn test_tag_cache_miss_allows_download() {
             dest.to_str().unwrap().to_string(),
             if cfg!(windows) { "repo.exe" } else { "repo" },
         );
-        state.save();
+        state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
 
@@ -700,7 +726,7 @@ fn test_tag_force_flag_bypasses_cache_check() {
             dest.to_str().unwrap().to_string(),
             if cfg!(windows) { "repo.exe" } else { "repo" },
         );
-        state.save();
+        state.save().unwrap();
 
         let args =
             Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0", "--force"]).unwrap();
@@ -729,7 +755,7 @@ fn test_info_subcommand_displays_cached_entry() {
             dest.to_str().unwrap().to_string(),
             if cfg!(windows) { "myapp.exe" } else { "myapp" },
         );
-        state.save();
+        state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "info", "owner/repo"]).unwrap();
         let Command::Info { repo } = args.command.unwrap() else {

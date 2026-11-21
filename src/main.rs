@@ -98,7 +98,7 @@ fn cmd_register(path: &Path) -> Result<()> {
     let mut cache = state::State::load();
     let path_str = path.display().to_string();
     cache.set_default_install_dir(&path_str);
-    cache.save();
+    cache.save()?;
     println!("Default install directory set to: {}", path.display());
     Ok(())
 }
@@ -125,13 +125,13 @@ fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
             };
             config::validate_pat_format(&token)?;
             cache.set_github_pat(&token);
-            cache.save();
+            cache.save()?;
             println!("GitHub PAT saved to the settings file");
         }
         GithubPatAction::Unset => {
             if cache.get_github_pat().is_some() {
                 cache.clear_github_pat();
-                cache.save();
+                cache.save()?;
                 println!("GitHub PAT removed from the settings file");
             } else {
                 eprintln!("Warning: no GitHub PAT stored — nothing to unset.");
@@ -175,7 +175,11 @@ fn cmd_remove(repo: &str) -> Result<()> {
             eprintln!("Warning: binary not found at {:?}", target_path);
         }
 
-        cache.save();
+        // The binary is already gone, so a failed state update must surface:
+        // the cache would otherwise keep claiming an install that is gone.
+        cache
+            .save()
+            .context("binary removed but failed to update the state file")?;
     } else {
         eprintln!(
             "Warning: no cached entry found for '{}' — nothing to remove.",
@@ -465,7 +469,11 @@ fn install_release(
         dest.display().to_string(),
         &out_file,
     );
-    cache.save();
+    // The binary is already in place; still fail loudly so the user knows
+    // this install will not be tracked (and so will re-download next time).
+    cache
+        .save()
+        .context("binary installed but failed to record it in the state file")?;
 
     println!("Successfully installed '{}' to {:?}", out_file, dest);
     Ok(())
