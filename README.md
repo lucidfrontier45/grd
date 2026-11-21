@@ -306,6 +306,34 @@ always wins over the preference and forces a tar/`.exe` asset:
 grd owner/repo --exclude zip
 ```
 
+## Version Resolution
+
+With no `--tag`, `grd` never trusts GitHub's owner-controlled "Latest"
+label blindly, but it also avoids walking a repository's entire release
+list (which is slow on projects that publish nightly builds). Resolution is
+cheapest-first:
+
+1. **Latest-label hint**: the owner-marked release from `/releases/latest`
+   (one request). It is accepted only when it is stable, belongs to the
+   installed tag family and is not older than the installed version; when it
+   claims to be a newer version, GitHub's compare API must additionally
+   confirm that its tag is ahead of the installed one in git history. A tag
+   the compare API contradicts is excluded from the fallback scan as well.
+2. **Bounded release scan**: the release list is walked newest-first and the
+   walk stops once `stable_scan_limit` stable releases have been seen. The
+   newest stable release in the installed tag family wins (across all
+   families for a fresh install). If the family has no stable release inside
+   that window, `grd` errors instead of silently switching release streams.
+
+`stable_scan_limit` lives in `~/.grd/state.toml` and defaults to `20`:
+
+```toml
+stable_scan_limit = 20
+```
+
+Raise it for repositories where the newest releases of your installed
+version stream sit behind many newer releases of other streams.
+
 ## Version Cache
 
 To avoid redundant downloads, `grd` caches the last-downloaded release version per
@@ -327,6 +355,7 @@ repository in `~/.grd/state.toml`:
   - `destination` is mandatory and records where the binary was installed.
   - `binary` records the installed filename (e.g. `fd.exe` on Windows). Entries written before `--rename` existed omit it; `grd remove` and `grd info` then fall back to the repo basename.
   - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
+  - An optional `stable_scan_limit` at the top level bounds the release-list walk used to resolve "latest" (see [Version Resolution](#version-resolution)); invalid values (below 1, negative, non-integer) fall back to the default of 20 instead of corrupting the state file.
   - Paths kept in the state file must be valid UTF-8, because the file itself is TOML. A `--destination` or a registered install directory whose bytes are not valid UTF-8 is rejected with an error instead of being stored mangled, which would point later installs at a different directory.
 
 ## Options

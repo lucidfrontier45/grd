@@ -295,7 +295,12 @@ fn run_install(args: &Args) -> Result<()> {
     let cached_tag = state.get_cached(repo).map(|cached| cached.tag.clone());
     let release = match args.tag.as_deref() {
         Some(tag) => github::fetch_release_info(&agent, repo, Some(tag))?,
-        None => github::fetch_upgrade_release(&agent, repo, cached_tag.as_deref())?,
+        None => github::fetch_upgrade_release(
+            &agent,
+            repo,
+            cached_tag.as_deref(),
+            state.get_stable_scan_limit(),
+        )?,
     };
     if args.tag.is_none()
         && let Some(installed_tag) = cached_tag.as_deref()

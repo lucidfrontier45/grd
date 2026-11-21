@@ -34,6 +34,45 @@ fn test_select_asset_from_real_repo() {
     }
 }
 
+/// Upgrade resolution accepts the owner-latest hint when it is a stable
+/// release newer than the cached install in the same tag family and the
+/// compare API confirms it is ahead — one or two requests instead of a
+/// release-list walk.
+#[test]
+fn test_fetch_upgrade_release_accepts_verified_hint() {
+    let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+    let token = get_auth_token(None);
+    let agent = configure_agent(&ua, token.as_deref());
+
+    let latest = fetch_release_info(&agent, "lucidfrontier45/grd", None).unwrap();
+    let selected =
+        crate::github::fetch_upgrade_release(&agent, "lucidfrontier45/grd", Some("0.1.0"), 5)
+            .unwrap();
+    assert_eq!(selected.tag_name, latest.tag_name);
+}
+
+/// A cached tag whose family has no stable release inside the scan window
+/// must produce the bounded-scan error that names the settings key — never
+/// a silent upgrade to an unrelated release stream.
+#[test]
+fn test_fetch_upgrade_release_reports_missing_family_within_scan_window() {
+    let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+    let token = get_auth_token(None);
+    let agent = configure_agent(&ua, token.as_deref());
+
+    let err = crate::github::fetch_upgrade_release(
+        &agent,
+        "lucidfrontier45/grd",
+        Some("grd-test-9.9.9"),
+        5,
+    )
+    .err()
+    .expect("family 'grd-test-9' has no releases");
+    let msg = err.to_string();
+    assert!(msg.contains("stable_scan_limit"), "got: {msg}");
+    assert!(msg.contains("grd-test-9"), "got: {msg}");
+}
+
 /// Goal regression against the real sharkdp/fd release: for a linux/x86_64
 /// target, no ARM artifact (aarch64, arm64, 32-bit arm, EABI triples) may
 /// appear among the selected matches. Pinned to v10.4.2 for determinism.
