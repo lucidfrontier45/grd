@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::IsTerminal,
+    io::{BufRead, IsTerminal},
     path::{Path, PathBuf},
 };
 
@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use grd::{
     asset,
-    cli::{Args, Command},
+    cli::{Args, Command, ConfigCommand, GithubPatAction},
     config, confirm_upgrade, download, extract, github, naming, state,
 };
 use ureq::Agent;
@@ -89,6 +89,7 @@ fn run_command(command: &Command) -> Result<()> {
         Command::Info { repo } => cmd_info(repo),
         Command::ListInstalled => cmd_list_installed(),
         Command::ListPlatform => cmd_list_platform(),
+        Command::Config { command } => cmd_config(command),
     }
 }
 
@@ -97,9 +98,70 @@ fn cmd_register(path: &Path) -> Result<()> {
     let mut cache = state::State::load();
     let path_str = path.display().to_string();
     cache.set_default_install_dir(&path_str);
-    cache.save();
+    cache.save()?;
     println!("Default install directory set to: {}", path.display());
     Ok(())
+}
+
+/// `grd config`: manage settings stored in the state file.
+fn cmd_config(command: &ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::GithubPat { action } => cmd_github_pat(action),
+    }
+}
+
+/// `grd config github_pat set <token>` / `grd config github_pat unset`:
+/// store or remove the GitHub PAT. Environment variables still take
+/// precedence over the stored value; the token is never echoed back.
+fn cmd_github_pat(action: &GithubPatAction) -> Result<()> {
+    let mut cache = state::State::load();
+    match action {
+        GithubPatAction::Set { token } => {
+            let token = match token {
+                Some(t) => t.clone(),
+                // No positional: read the token from stdin so it can be
+                // piped without landing in shell history or argv.
+                None => read_token_from_stdin()?,
+            };
+            config::validate_pat_format(&token)?;
+            cache.set_github_pat(&token);
+            cache.save()?;
+            println!("GitHub PAT saved to the settings file");
+        }
+        GithubPatAction::Unset => {
+            if cache.get_github_pat().is_some() {
+                cache.clear_github_pat();
+                cache.save()?;
+                println!("GitHub PAT removed from the settings file");
+            } else {
+                eprintln!("Warning: no GitHub PAT stored — nothing to unset.");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read a PAT from stdin (a single line, trimmed) when `set` is called
+/// without a positional token.
+fn read_token_from_stdin() -> Result<String> {
+    if std::io::stdin().is_terminal() {
+        // Prompt on stderr so piped invocations stay clean while
+        // interactive users see that input is expected.
+        eprint!("Paste token: ");
+    }
+    read_token_from_reader(&mut std::io::stdin().lock())
+}
+
+fn read_token_from_reader(input: &mut impl BufRead) -> Result<String> {
+    let mut line = String::new();
+    input
+        .read_line(&mut line)
+        .context("failed to read token from stdin")?;
+    let token = line.trim().to_string();
+    if token.is_empty() {
+        bail!("no token provided; pass it as an argument or pipe it to stdin");
+    }
+    Ok(token)
 }
 
 /// `grd remove`: delete the installed binary and its cache entry.
@@ -118,7 +180,11 @@ fn cmd_remove(repo: &str) -> Result<()> {
             eprintln!("Warning: binary not found at {:?}", target_path);
         }
 
-        cache.save();
+        // The binary is already gone, so a failed state update must surface:
+        // the cache would otherwise keep claiming an install that is gone.
+        cache
+            .save()
+            .context("binary removed but failed to update the state file")?;
     } else {
         eprintln!(
             "Warning: no cached entry found for '{}' — nothing to remove.",
@@ -181,16 +247,17 @@ fn cmd_list_platform() -> Result<()> {
 
 /// The install pipeline for the no-subcommand path.
 fn run_install(args: &Args) -> Result<()> {
-    let dest = resolve_dest(args)?;
-    let (agent, repo) = prepare_request(args)?;
+    // One load feeds the destination, the auth token and the cached tag;
+    // `install_release` reloads on its own after the download completes.
+    let state = state::State::load();
+    let dest = resolve_dest(args, &state)?;
+    let (agent, repo) = prepare_request(args, state.get_github_pat())?;
 
     if args.list {
         return list_available_releases(&agent, repo);
     }
 
-    let cached_tag = state::State::load()
-        .get_cached(repo)
-        .map(|cached| cached.tag.clone());
+    let cached_tag = state.get_cached(repo).map(|cached| cached.tag.clone());
     let release = match args.tag.as_deref() {
         Some(tag) => github::fetch_release_info(&agent, repo, Some(tag))?,
         None => github::fetch_upgrade_release(&agent, repo, cached_tag.as_deref())?,
@@ -223,10 +290,10 @@ fn run_install(args: &Args) -> Result<()> {
 
 /// Destination directory: `--destination`, else the registered default, else
 /// the platform default. Created unless `--dry-run`.
-fn resolve_dest(args: &Args) -> Result<PathBuf> {
+fn resolve_dest(args: &Args, state: &state::State) -> Result<PathBuf> {
     let dest = match &args.destination {
         Some(d) => d.clone(),
-        None => state::State::load()
+        None => state
             .get_default_install_dir()
             .map(PathBuf::from)
             .unwrap_or_else(state::State::default_install_path),
@@ -240,9 +307,9 @@ fn resolve_dest(args: &Args) -> Result<PathBuf> {
 /// Build the API client and pass the remaining local validations before any
 /// network work: a rejected value must not cost the user a release lookup or
 /// an asset download.
-fn prepare_request(args: &Args) -> Result<(Agent, &str)> {
+fn prepare_request<'a>(args: &'a Args, file_pat: Option<&str>) -> Result<(Agent, &'a str)> {
     let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
-    let token = config::get_auth_token();
+    let token = config::get_auth_token(file_pat);
     let agent = config::configure_agent(&ua, token.as_deref());
 
     let repo = args
@@ -407,7 +474,11 @@ fn install_release(
         dest.display().to_string(),
         &out_file,
     );
-    cache.save();
+    // The binary is already in place; still fail loudly so the user knows
+    // this install will not be tracked (and so will re-download next time).
+    cache
+        .save()
+        .context("binary installed but failed to record it in the state file")?;
 
     println!("Successfully installed '{}' to {:?}", out_file, dest);
     Ok(())
@@ -532,6 +603,22 @@ fn dry_run_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_read_token_from_reader_trims_input() {
+        let mut input = std::io::Cursor::new("ghp_token_value\n");
+        assert_eq!(
+            read_token_from_reader(&mut input).unwrap(),
+            "ghp_token_value"
+        );
+    }
+
+    #[test]
+    fn test_read_token_from_reader_rejects_empty_line() {
+        let mut input = std::io::Cursor::new("\n");
+        let err = read_token_from_reader(&mut input).unwrap_err().to_string();
+        assert!(err.contains("no token provided"), "got: {err}");
+    }
 
     #[test]
     fn test_validate_rename_accepts_plain_filenames() {

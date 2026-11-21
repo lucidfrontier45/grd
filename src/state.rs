@@ -1,8 +1,45 @@
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
-use std::{collections::HashMap, env, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// Write the state file without ever making it group/world readable.
+///
+/// Since the file can hold a GitHub PAT, an existing file is restricted to
+/// owner-only mode before its contents are replaced, and a new file is
+/// created with owner-only mode directly, so no wider mode is ever visible
+/// on disk — not even briefly.
+#[cfg(unix)]
+fn write_state_file(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::{
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    if path.exists() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(content.as_bytes())
+}
+
+/// Non-Unix fallback: files under the user profile inherit ACLs that already
+/// exclude other standard users, and std exposes no ACL API.
+#[cfg(not(unix))]
+fn write_state_file(path: &Path, content: &str) -> std::io::Result<()> {
+    fs::write(path, content)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CachedRelease {
@@ -40,6 +77,11 @@ pub struct State {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_install_dir: Option<String>,
+
+    /// GitHub personal access token used when neither `GITHUB_PAT` nor
+    /// `GITHUB_TOKEN` is set in the environment. Stored in plaintext.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_pat: Option<String>,
 }
 
 impl State {
@@ -112,38 +154,24 @@ impl State {
         }
     }
 
-    pub fn save(&self) {
-        let path = match Self::state_path() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Warning: cannot determine home directory: {}", e);
-                return;
-            }
-        };
-
-        let Some(parent) = path.parent() else {
-            eprintln!("Warning: state file {:?} has no parent directory", path);
-            return;
-        };
-        if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!(
-                "Warning: failed to create state directory {:?}: {}",
-                parent, e
-            );
-            return;
-        }
-
-        let content = match toml::to_string_pretty(self) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Warning: failed to serialize state: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = fs::write(&path, content) {
-            eprintln!("Warning: failed to write state file {:?}: {}", path, e);
-        }
+    /// Serialize the state and write it to the state file.
+    ///
+    /// The file is created with owner-only permissions where the platform
+    /// supports it (see [`write_state_file`]). All failures propagate:
+    /// a failed save aborts the command with a non-zero exit instead of a
+    /// silently lost setting or cache entry.
+    pub fn save(&self) -> Result<()> {
+        let path = Self::state_path()
+            .map_err(|e| anyhow::anyhow!("cannot determine home directory: {e}"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("state file {path:?} has no parent directory"))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create state directory {parent:?}"))?;
+        let content = toml::to_string_pretty(self).context("failed to serialize state")?;
+        write_state_file(&path, &content)
+            .with_context(|| format!("failed to write state file {path:?}"))?;
+        Ok(())
     }
 
     pub fn get_cached(&self, repo: &str) -> Option<&CachedRelease> {
@@ -160,6 +188,18 @@ impl State {
 
     pub fn set_default_install_dir(&mut self, path: &str) {
         self.default_install_dir = Some(path.to_string());
+    }
+
+    pub fn get_github_pat(&self) -> Option<&str> {
+        self.github_pat.as_deref()
+    }
+
+    pub fn set_github_pat(&mut self, token: &str) {
+        self.github_pat = Some(token.to_string());
+    }
+
+    pub fn clear_github_pat(&mut self) {
+        self.github_pat = None;
     }
 
     pub fn set_cached(
@@ -327,7 +367,7 @@ mod tests {
             "",
         );
         state.set_cached("other/repo", "bar-macos.zip", "v2.3.1", String::new(), "");
-        state.save();
+        state.save().unwrap();
 
         let loaded = State::load();
         let a = loaded.get_cached("owner/repo").unwrap();
@@ -417,7 +457,7 @@ asset = "foo.tar.gz"
             "/usr/local/bin".to_string(),
             "fd2",
         );
-        state.save();
+        state.save().unwrap();
 
         let loaded = State::load();
         let entry = loaded.get_cached("sharkdp/fd").unwrap();
@@ -518,7 +558,7 @@ destination = "/usr/local/bin"
 
         let mut state = State::default();
         state.set_default_install_dir("/opt/bin");
-        state.save();
+        state.save().unwrap();
 
         let loaded = State::load();
         assert_eq!(loaded.default_install_dir.as_deref(), Some("/opt/bin"));
@@ -534,6 +574,92 @@ destination = "/usr/local/bin"
         state.set_default_install_dir("/tmp");
         let content = toml::to_string_pretty(&state).unwrap();
         assert!(content.contains("default_install_dir"));
+    }
+
+    #[test]
+    fn test_github_pat_defaults_to_none() {
+        let state = State::default();
+        assert_eq!(state.get_github_pat(), None);
+    }
+
+    #[test]
+    fn test_set_and_clear_github_pat() {
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        assert_eq!(
+            state.get_github_pat(),
+            Some("ghp_0123456789abcdefghijklmnopqrstuv")
+        );
+        state.clear_github_pat();
+        assert_eq!(state.get_github_pat(), None);
+    }
+
+    #[test]
+    fn test_github_pat_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        state.save().unwrap();
+
+        let loaded = State::load();
+        assert_eq!(
+            loaded.get_github_pat(),
+            Some("ghp_0123456789abcdefghijklmnopqrstuv")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_error_includes_state_file_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        // A directory in place of the state file makes the final write fail.
+        fs::create_dir(&state_path).unwrap();
+        let err = State::default().save().unwrap_err().to_string();
+        assert!(
+            err.contains("state.toml"),
+            "error should name the file: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_state_file_is_owner_only_readable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        state.save().unwrap();
+
+        let mode = fs::metadata(&state_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        // A pre-existing wider-mode file must be tightened on rewrite.
+        fs::set_permissions(&state_path, fs::Permissions::from_mode(0o644)).unwrap();
+        State::load().save().unwrap();
+        let mode = fs::metadata(&state_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_github_pat_serialized_only_when_set() {
+        let state = State::default();
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(!content.contains("github_pat"));
+
+        let mut state = State::default();
+        state.set_github_pat("ghp_0123456789abcdefghijklmnopqrstuv");
+        let content = toml::to_string_pretty(&state).unwrap();
+        assert!(content.contains("github_pat"));
     }
 
     #[test]
