@@ -327,6 +327,7 @@ repository in `~/.grd/state.toml`:
   - `destination` is mandatory and records where the binary was installed.
   - `binary` records the installed filename (e.g. `fd.exe` on Windows). Entries written before `--rename` existed omit it; `grd remove` and `grd info` then fall back to the repo basename.
   - An optional `default_install_dir` at the top level may be set via `grd register <path>`. When `--destination` is not passed, newly downloaded releases use this path.
+  - Paths kept in the state file must be valid UTF-8, because the file itself is TOML. A `--destination` or a registered install directory whose bytes are not valid UTF-8 is rejected with an error instead of being stored mangled, which would point later installs at a different directory.
 
 ## Options
 

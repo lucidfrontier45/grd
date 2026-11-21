@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use tempfile::TempDir;
@@ -383,13 +386,15 @@ fn test_remove_deletes_file_and_state_entry() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "test/repo",
-            "file.tar.gz",
-            "v1.0.0",
-            dir.path().display().to_string(),
-            if cfg!(windows) { "repo.exe" } else { "repo" },
-        );
+        state
+            .set_cached(
+                "test/repo",
+                "file.tar.gz",
+                "v1.0.0",
+                dir.path(),
+                if cfg!(windows) { "repo.exe" } else { "repo" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
@@ -414,13 +419,15 @@ fn test_remove_warns_when_binary_missing() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "test/repo",
-            "file.tar.gz",
-            "v1.0.0",
-            dir.path().display().to_string(),
-            if cfg!(windows) { "repo.exe" } else { "repo" },
-        );
+        state
+            .set_cached(
+                "test/repo",
+                "file.tar.gz",
+                "v1.0.0",
+                dir.path(),
+                if cfg!(windows) { "repo.exe" } else { "repo" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let bin_name = if cfg!(windows) { "repo.exe" } else { "repo" };
@@ -450,13 +457,15 @@ fn test_remove_uses_recorded_renamed_filename() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "test/repo",
-            "file.tar.gz",
-            "v1.0.0",
-            dir.path().display().to_string(),
-            "custom-name",
-        );
+        state
+            .set_cached(
+                "test/repo",
+                "file.tar.gz",
+                "v1.0.0",
+                dir.path(),
+                "custom-name",
+            )
+            .unwrap();
         state.save().unwrap();
 
         let renamed_path = dir.path().join("custom-name");
@@ -530,14 +539,18 @@ fn test_list_installed_displays_installed_packages() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "owner/repo",
-            "foo-linux.tar.gz",
-            "v1.0.0",
-            String::new(),
-            "",
-        );
-        state.set_cached("other/app", "bar-macos.zip", "v2.3.1", String::new(), "");
+        state
+            .set_cached(
+                "owner/repo",
+                "foo-linux.tar.gz",
+                "v1.0.0",
+                Path::new(""),
+                "",
+            )
+            .unwrap();
+        state
+            .set_cached("other/app", "bar-macos.zip", "v2.3.1", Path::new(""), "")
+            .unwrap();
         state.save().unwrap();
 
         let cache = State::load();
@@ -568,7 +581,9 @@ fn test_register_subcommand_persists_to_state() {
     with_state_path(&dir, || {
         // Simulate what main.rs does on "grd register /custom/path"
         let mut state = State::default();
-        state.set_default_install_dir("/custom/path");
+        state
+            .set_default_install_dir(Path::new("/custom/path"))
+            .unwrap();
         state.save().unwrap();
 
         let loaded = State::load();
@@ -583,7 +598,9 @@ fn test_install_dir_set_persists_to_state() {
         // Same setting that "grd register /custom/path" writes, reached via
         // "grd config install_dir set /custom/path".
         let mut state = State::default();
-        state.set_default_install_dir("/custom/path");
+        state
+            .set_default_install_dir(Path::new("/custom/path"))
+            .unwrap();
         state.save().unwrap();
 
         let loaded = State::load();
@@ -596,7 +613,9 @@ fn test_install_dir_unset_clears_state() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_default_install_dir("/custom/path");
+        state
+            .set_default_install_dir(Path::new("/custom/path"))
+            .unwrap();
         state.save().unwrap();
 
         // "grd config install_dir unset" only clears when a value exists.
@@ -613,7 +632,9 @@ fn test_destination_falls_back_to_registered_dir() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_default_install_dir("/registered/path");
+        state
+            .set_default_install_dir(Path::new("/registered/path"))
+            .unwrap();
         state.save().unwrap();
 
         // When --destination is None, the fallback logic should pick up the registered dir
@@ -654,7 +675,9 @@ fn test_list_installed_does_not_modify_state() {
     let dir = TempDir::new().unwrap();
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached("owner/repo", "foo.tar.gz", "v1.0.0", String::new(), "");
+        state
+            .set_cached("owner/repo", "foo.tar.gz", "v1.0.0", Path::new(""), "")
+            .unwrap();
         state.save().unwrap();
 
         let before = std::fs::read_to_string(std::env::var("GRD_STATE_PATH").unwrap()).unwrap();
@@ -680,13 +703,15 @@ fn test_tag_cache_hit_conditions_met() {
 
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "owner/repo",
-            "asset.tar.gz",
-            "v1.0.0",
-            dest.to_str().unwrap().to_string(),
-            if cfg!(windows) { "repo.exe" } else { "repo" },
-        );
+        state
+            .set_cached(
+                "owner/repo",
+                "asset.tar.gz",
+                "v1.0.0",
+                &dest,
+                if cfg!(windows) { "repo.exe" } else { "repo" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
@@ -717,13 +742,15 @@ fn test_tag_cache_miss_allows_download() {
     with_state_path(&dir, || {
         let mut state = State::default();
         // Cached at v0.9.0
-        state.set_cached(
-            "owner/repo",
-            "asset.tar.gz",
-            "v0.9.0",
-            dest.to_str().unwrap().to_string(),
-            if cfg!(windows) { "repo.exe" } else { "repo" },
-        );
+        state
+            .set_cached(
+                "owner/repo",
+                "asset.tar.gz",
+                "v0.9.0",
+                &dest,
+                if cfg!(windows) { "repo.exe" } else { "repo" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "owner/repo", "--tag", "v1.0.0"]).unwrap();
@@ -751,13 +778,15 @@ fn test_tag_force_flag_bypasses_cache_check() {
 
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "owner/repo",
-            "asset.tar.gz",
-            "v1.0.0",
-            dest.to_str().unwrap().to_string(),
-            if cfg!(windows) { "repo.exe" } else { "repo" },
-        );
+        state
+            .set_cached(
+                "owner/repo",
+                "asset.tar.gz",
+                "v1.0.0",
+                &dest,
+                if cfg!(windows) { "repo.exe" } else { "repo" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let args =
@@ -780,13 +809,15 @@ fn test_info_subcommand_displays_cached_entry() {
 
     with_state_path(&dir, || {
         let mut state = State::default();
-        state.set_cached(
-            "owner/repo",
-            "myapp.zip",
-            "v1.0.0",
-            dest.to_str().unwrap().to_string(),
-            if cfg!(windows) { "myapp.exe" } else { "myapp" },
-        );
+        state
+            .set_cached(
+                "owner/repo",
+                "myapp.zip",
+                "v1.0.0",
+                &dest,
+                if cfg!(windows) { "myapp.exe" } else { "myapp" },
+            )
+            .unwrap();
         state.save().unwrap();
 
         let args = Args::try_parse_from(["grd", "info", "owner/repo"]).unwrap();
