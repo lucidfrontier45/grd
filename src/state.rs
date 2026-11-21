@@ -9,6 +9,15 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Default for [`State::stable_scan_limit`]: how many of the newest stable
+/// releases to walk when the owner-marked "Latest" release cannot decide an
+/// upgrade (see `github::fetch_upgrade_release`).
+const DEFAULT_STABLE_SCAN_LIMIT: usize = 20;
+
+fn default_stable_scan_limit() -> usize {
+    DEFAULT_STABLE_SCAN_LIMIT
+}
+
 /// The path as it can be stored in the state file.
 ///
 /// The state file is TOML, so every value in it must be valid UTF-8, while
@@ -98,6 +107,14 @@ pub struct State {
     /// `GITHUB_TOKEN` is set in the environment. Stored in plaintext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_pat: Option<String>,
+
+    /// How many of the newest stable releases to walk when the owner-marked
+    /// "Latest" release is not a usable upgrade hint; the release-list walk
+    /// stops once this many stable candidates have been seen. Edit this key
+    /// in the state file to change it; values below 1 fall back to
+    /// [`DEFAULT_STABLE_SCAN_LIMIT`].
+    #[serde(default = "default_stable_scan_limit")]
+    pub stable_scan_limit: usize,
 }
 
 impl State {
@@ -228,6 +245,14 @@ impl State {
         self.github_pat = None;
     }
 
+    /// The stable-release scan limit, with values below 1 treated as unset.
+    pub fn get_stable_scan_limit(&self) -> usize {
+        match self.stable_scan_limit {
+            0 => DEFAULT_STABLE_SCAN_LIMIT,
+            limit => limit,
+        }
+    }
+
     /// Record an install in the cache.
     ///
     /// The destination must be valid UTF-8 (see [`storable_path`]) for the
@@ -311,6 +336,30 @@ mod tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn test_stable_scan_limit_defaults_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        // Missing file: the built-in default applies.
+        assert_eq!(
+            State::load().get_stable_scan_limit(),
+            DEFAULT_STABLE_SCAN_LIMIT
+        );
+
+        // An explicit value in the state file wins.
+        fs::write(&state_path, "stable_scan_limit = 3\n").unwrap();
+        assert_eq!(State::load().get_stable_scan_limit(), 3);
+
+        // Values below 1 are treated as unset.
+        fs::write(&state_path, "stable_scan_limit = 0\n").unwrap();
+        assert_eq!(
+            State::load().get_stable_scan_limit(),
+            DEFAULT_STABLE_SCAN_LIMIT
+        );
     }
 
     #[test]

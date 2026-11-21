@@ -56,44 +56,86 @@ pub struct Asset {
     pub size: u64,
 }
 
+/// Every release of the repository, newest first, following GitHub's
+/// pagination links to the end. This is the full walk `--list` needs;
+/// version resolution uses the bounded [`scan_recent_releases`] instead.
 pub fn list_releases(agent: &Agent, repo: &str) -> Result<Vec<Release>> {
-    validate_repo(repo)?;
-    let endpoint = format!("https://api.github.com/repos/{repo}/releases?");
-    let first_url = format!("{endpoint}per_page=100&page=1");
-    collect_release_pages(Some(first_url), |url| {
-        let mut response = match agent.get(url).call() {
-            Ok(r) => r,
-            Err(UreqError::StatusCode(status_code)) => {
-                if is_unauthorized(status_code) {
-                    bail!(
-                        "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
-                    );
-                }
-                if is_rate_limited(status_code) {
-                    bail!(
-                        "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
-                    );
-                }
-                bail!("Failed to list releases for {}: HTTP {}", repo, status_code);
-            }
-            Err(e) => return Err(e).context("Failed to list releases"),
-        };
-        let next_url = response
-            .headers()
-            .get("link")
-            .and_then(|value| value.to_str().ok())
-            .map(|link| next_page_url(link, &endpoint))
-            .transpose()?
-            .flatten();
-        let releases: Vec<Release> = response
-            .body_mut()
-            .read_json()
-            .context("Failed to parse releases")?;
-        Ok((releases, next_url))
-    })
+    let endpoint = releases_endpoint(repo)?;
+    collect_release_pages(
+        Some(format!("{endpoint}per_page=100&page=1")),
+        None,
+        |url| fetch_releases_page(agent, repo, &endpoint, url),
+    )
 }
 
-fn collect_release_pages<F>(mut next_url: Option<String>, mut fetch_page: F) -> Result<Vec<Release>>
+/// Walk the release list newest-first only until `scan_limit` stable
+/// candidates ([`is_stable_candidate`]) have been seen, then stop. Every
+/// release visited is returned — prereleases included — because the
+/// selectors filter on their own; the limit only bounds how deep the walk
+/// goes, so a repository that floods its list with prereleases (nightly
+/// builds) cannot force a full scan.
+fn scan_recent_releases(agent: &Agent, repo: &str, scan_limit: usize) -> Result<Vec<Release>> {
+    let endpoint = releases_endpoint(repo)?;
+    collect_release_pages(
+        Some(format!("{endpoint}per_page=100&page=1")),
+        Some(scan_limit),
+        |url| fetch_releases_page(agent, repo, &endpoint, url),
+    )
+}
+
+/// The releases endpoint URL (trailing `?` included) after validating `repo`.
+fn releases_endpoint(repo: &str) -> Result<String> {
+    validate_repo(repo)?;
+    Ok(format!("https://api.github.com/repos/{repo}/releases?"))
+}
+
+/// Fetch one page of the release list plus the URL of the next page, if any.
+fn fetch_releases_page(
+    agent: &Agent,
+    repo: &str,
+    endpoint: &str,
+    url: &str,
+) -> Result<(Vec<Release>, Option<String>)> {
+    let mut response = match agent.get(url).call() {
+        Ok(r) => r,
+        Err(UreqError::StatusCode(status_code)) => {
+            if is_unauthorized(status_code) {
+                bail!(
+                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                );
+            }
+            if is_rate_limited(status_code) {
+                bail!(
+                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                );
+            }
+            bail!("Failed to list releases for {}: HTTP {}", repo, status_code);
+        }
+        Err(e) => return Err(e).context("Failed to list releases"),
+    };
+    let next_url = response
+        .headers()
+        .get("link")
+        .and_then(|value| value.to_str().ok())
+        .map(|link| next_page_url(link, endpoint))
+        .transpose()?
+        .flatten();
+    let releases: Vec<Release> = response
+        .body_mut()
+        .read_json()
+        .context("Failed to parse releases")?;
+    Ok((releases, next_url))
+}
+
+/// Follow pagination links, collecting pages. With `stable_budget`, stop
+/// as soon as that many stable candidates have been seen — the list is
+/// newest-first, so the walk stays bounded without losing the front of the
+/// release history.
+fn collect_release_pages<F>(
+    mut next_url: Option<String>,
+    stable_budget: Option<usize>,
+    mut fetch_page: F,
+) -> Result<Vec<Release>>
 where
     F: FnMut(&str) -> Result<(Vec<Release>, Option<String>)>,
 {
@@ -106,10 +148,25 @@ where
         }
         let (mut page, following_url) = fetch_page(&url)?;
         releases.append(&mut page);
+        if let Some(budget) = stable_budget
+            && count_stable_candidates(&releases) >= budget
+        {
+            break;
+        }
         next_url = following_url;
     }
 
     Ok(releases)
+}
+
+/// A release the version selectors may pick: published (not a draft, not a
+/// prerelease) and carrying a parseable `X.Y.Z` tag ([`parse_tag_version`]).
+fn is_stable_candidate(release: &Release) -> bool {
+    !release.prerelease && !release.draft && parse_tag_version(&release.tag_name).is_some()
+}
+
+fn count_stable_candidates(releases: &[Release]) -> usize {
+    releases.iter().filter(|r| is_stable_candidate(r)).count()
 }
 
 fn next_page_url(link_header: &str, endpoint: &str) -> Result<Option<String>> {
@@ -148,15 +205,54 @@ fn is_trusted_releases_page_url(url: &str, endpoint: &str) -> bool {
         && !query.is_empty()
 }
 
-pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Result<Release> {
+/// The release the repository owner marked as "Latest".
+///
+/// GitHub computes nothing for this label: the owner points it anywhere, so
+/// it may reference a prerelease or lag behind the newest tag. Callers treat
+/// it as a hint ([`fetch_upgrade_release`], [`fetch_install_release`]),
+/// not as an authoritative newest release.
+///
+/// `Ok(None)` when the repository has no release marked as latest (GitHub
+/// answers 404 — for example when every release is a prerelease).
+fn fetch_owner_latest(agent: &Agent, repo: &str) -> Result<Option<Release>> {
     validate_repo(repo)?;
-    let url = match tag {
-        Some(t) => format!(
-            "https://api.github.com/repos/{repo}/releases/tags/{}",
-            urlencoding::encode(t)
-        ),
-        None => format!("https://api.github.com/repos/{repo}/releases/latest"),
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    match agent.get(&url).call() {
+        Ok(mut response) => {
+            let release = response
+                .body_mut()
+                .read_json()
+                .context("Failed to parse release info")?;
+            Ok(Some(release))
+        }
+        Err(UreqError::StatusCode(404)) => Ok(None),
+        Err(UreqError::StatusCode(status_code)) => {
+            if is_unauthorized(status_code) {
+                bail!(
+                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                );
+            }
+            if is_rate_limited(status_code) {
+                bail!(
+                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                );
+            }
+            bail!("Failed to fetch the latest release of {repo}: HTTP {status_code}");
+        }
+        Err(e) => Err(e).context("Failed to fetch the latest release"),
+    }
+}
+
+pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Result<Release> {
+    let Some(tag) = tag else {
+        return fetch_owner_latest(agent, repo)?
+            .ok_or_else(|| anyhow::anyhow!("no release marked as latest for {repo}"));
     };
+    validate_repo(repo)?;
+    let url = format!(
+        "https://api.github.com/repos/{repo}/releases/tags/{}",
+        urlencoding::encode(tag)
+    );
 
     let mut response = match agent.get(&url).call() {
         Ok(r) => r,
@@ -171,21 +267,11 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
                     "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
                 );
             }
-            bail!(
-                "Failed to fetch release info for {}/{}: HTTP {}",
-                repo,
-                tag.unwrap_or("latest"),
-                status_code
-            );
+            bail!("Failed to fetch release info for {repo}/{tag}: HTTP {status_code}");
         }
         Err(e) => {
-            return Err(e).with_context(|| {
-                format!(
-                    "Failed to fetch release info for {}/{}",
-                    repo,
-                    tag.unwrap_or("latest")
-                )
-            });
+            return Err(e)
+                .with_context(|| format!("Failed to fetch release info for {repo}/{tag}"));
         }
     };
 
@@ -195,39 +281,161 @@ pub fn fetch_release_info(agent: &Agent, repo: &str, tag: Option<&str>) -> Resul
         .context("Failed to parse release info")
 }
 
-/// Fetch the newest stable release across all tag families, for fresh
-/// installs where no tag is cached. Like [`fetch_upgrade_release`], this
-/// scans the release list instead of trusting owner-controlled
-/// `/releases/latest` — see that function's docs for the rationale.
-pub fn fetch_install_release(agent: &Agent, repo: &str) -> Result<Release> {
-    let releases = list_releases(agent, repo)?;
+/// Fetch the newest stable release for a fresh install (nothing cached).
+///
+/// The owner-marked "Latest" release joins the candidate pool, but so do the
+/// `scan_limit` newest stable releases from the release list
+/// ([`scan_recent_releases`]), and the overall maximum wins
+/// ([`select_latest_release`]): the label can lag behind the real newest
+/// tag, and GitHub offers no endpoint that computes a version maximum.
+pub fn fetch_install_release(agent: &Agent, repo: &str, scan_limit: usize) -> Result<Release> {
+    let mut releases = scan_recent_releases(agent, repo, scan_limit)?;
+    if let Some(hint) = fetch_owner_latest(agent, repo)?
+        && !hint.prerelease
+        && !hint.draft
+    {
+        releases.push(hint);
+    }
     select_latest_release(releases)
         .ok_or_else(|| anyhow::anyhow!("No stable releases found for {repo}"))
 }
 
-/// Fetch the newest release in the same tag family as an installed version.
-/// GitHub's `/releases/latest` is owner-controlled and may point at another
-/// version stream, so upgrades with a cached tag inspect the release list.
+/// Fetch the release to upgrade to when `--tag` is not given and a version
+/// is already installed.
+///
+/// Resolution is cheapest-first:
+///
+/// 1. **Latest-label hint**: [`fetch_owner_latest`] in one request. The
+///    owner-controlled label is trusted only when [`check_hint`] approves
+///    the tag (stable, same tag family, not older than the install) and,
+///    when it claims to be newer, [`compare_is_ahead`] confirms the tag
+///    is really ahead of the installed one in git history.
+/// 2. **Bounded scan**: [`scan_recent_releases`] walks the release list
+///    until `scan_limit` stable candidates have been seen, and
+///    [`select_upgrade_release`] picks the newest in the installed tag
+///    family. A family with no stable release inside that window is an
+///    error, never a silent jump to an unrelated release stream.
 pub fn fetch_upgrade_release(
     agent: &Agent,
     repo: &str,
     cached_tag: Option<&str>,
+    scan_limit: usize,
 ) -> Result<Release> {
     let Some(cached_tag) = cached_tag else {
-        return fetch_install_release(agent, repo);
+        return fetch_install_release(agent, repo, scan_limit);
     };
 
     let Some(cached_version) = parse_tag_version(cached_tag) else {
-        return fetch_install_release(agent, repo);
+        return fetch_install_release(agent, repo, scan_limit);
     };
-    let releases = list_releases(agent, repo)?;
+
+    if let Some(hint) = fetch_owner_latest(agent, repo)? {
+        match check_hint(&hint, &cached_version) {
+            HintCheck::Accept => return Ok(hint),
+            HintCheck::VerifyWithCompare => {
+                let ahead = compare_is_ahead(agent, repo, cached_tag, &hint.tag_name)?;
+                if ahead != Some(false) {
+                    return Ok(hint);
+                }
+                eprintln!(
+                    "Note: '{}' is marked latest but is not ahead of '{cached_tag}' in git history; scanning releases instead",
+                    hint.tag_name
+                );
+            }
+            HintCheck::Reject => {
+                eprintln!(
+                    "Note: latest-release hint '{}' is not a usable upgrade; scanning releases instead",
+                    hint.tag_name
+                );
+            }
+        }
+    }
+
+    let releases = scan_recent_releases(agent, repo, scan_limit)?;
     let selected = select_upgrade_release(releases, &cached_version);
     match selected {
         Some(release) => Ok(release),
         None => bail!(
-            "No stable releases found for {repo} in the installed tag family '{}'; refusing to select an unrelated release",
+            "No stable release in the installed tag family '{}' within the latest {scan_limit} stable releases of {repo}; refusing to select an unrelated release. Raise stable_scan_limit in the settings file to scan further",
             cached_version.family
         ),
+    }
+}
+
+/// The compare-API fields used to order two refs.
+#[derive(Deserialize)]
+struct CompareInfo {
+    ahead_by: u64,
+}
+
+/// Whether `head` contains commits beyond `base` — strictly newer in git
+/// history. `Ok(None)` when GitHub offers no comparison at all (unknown
+/// ref or unrelated histories): the absence of a verdict is not a "no".
+fn compare_is_ahead(agent: &Agent, repo: &str, base: &str, head: &str) -> Result<Option<bool>> {
+    let url = format!(
+        "https://api.github.com/repos/{repo}/compare/{}...{}",
+        urlencoding::encode(base),
+        urlencoding::encode(head)
+    );
+    let mut response = match agent.get(&url).call() {
+        Ok(r) => r,
+        Err(UreqError::StatusCode(404 | 409)) => return Ok(None),
+        Err(UreqError::StatusCode(status_code)) => {
+            if is_unauthorized(status_code) {
+                bail!(
+                    "GitHub PAT authentication failed. Verify your token is valid and has 'public_repo' scope."
+                );
+            }
+            if is_rate_limited(status_code) {
+                bail!(
+                    "GitHub API rate limit exceeded. Configure GITHUB_PAT environment variable for increased limits (5000/hour vs 60/hour unauthenticated)."
+                );
+            }
+            bail!("Failed to compare {base}...{head} for {repo}: HTTP {status_code}");
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to compare {base}...{head} for {repo}"));
+        }
+    };
+    let info: CompareInfo = response
+        .body_mut()
+        .read_json()
+        .context("Failed to parse compare info")?;
+    Ok(Some(info.ahead_by > 0))
+}
+
+/// Verdict on using the owner-marked "Latest" release as an upgrade target.
+#[derive(Debug, PartialEq, Eq)]
+enum HintCheck {
+    /// Stable, in the installed tag family, at the same version: usable
+    /// as-is (the install already sits at that version).
+    Accept,
+    /// Newer than the install by version: usable only once the compare API
+    /// confirms the tag is ahead in git history, guarding against an owner
+    /// mislabeling an old build with a bumped version.
+    VerifyWithCompare,
+    /// Not usable: not stable, unparseable, from another tag family, or
+    /// older than the installed version.
+    Reject,
+}
+
+fn check_hint(hint: &Release, installed: &TagVersion) -> HintCheck {
+    if hint.prerelease || hint.draft {
+        return HintCheck::Reject;
+    }
+    let Some(version) = parse_tag_version(&hint.tag_name) else {
+        return HintCheck::Reject;
+    };
+    if version.family != installed.family {
+        return HintCheck::Reject;
+    }
+    if version.parts < installed.parts {
+        return HintCheck::Reject;
+    }
+    if version.parts == installed.parts {
+        HintCheck::Accept
+    } else {
+        HintCheck::VerifyWithCompare
     }
 }
 
@@ -368,6 +576,49 @@ mod tests {
     }
 
     #[test]
+    fn test_fetch_owner_latest_on_real_repo() {
+        let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+        let token = get_auth_token(None);
+        let agent = configure_agent(&ua, token.as_deref());
+
+        // fff publishes mostly prereleases, but its stable line carries the
+        // owner's "Latest" marker; the hint must be a stable full release.
+        let latest = fetch_owner_latest(&agent, "dmtrKovalenko/fff")
+            .unwrap()
+            .expect("fff marks a release as latest");
+        assert!(!latest.prerelease);
+        assert!(!latest.draft);
+        assert!(!latest.assets.is_empty());
+    }
+
+    #[test]
+    fn test_compare_is_ahead_on_real_repo() {
+        let ua = format!("lucidfrontier45/grd-{}", env!("CARGO_PKG_VERSION"));
+        let token = get_auth_token(None);
+        let agent = configure_agent(&ua, token.as_deref());
+
+        assert_eq!(
+            compare_is_ahead(&agent, "dmtrKovalenko/fff", "v0.10.6", "v0.11.0").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            compare_is_ahead(&agent, "dmtrKovalenko/fff", "v0.11.0", "v0.10.6").unwrap(),
+            Some(false)
+        );
+        // A ref GitHub cannot resolve yields no verdict, not "behind".
+        assert_eq!(
+            compare_is_ahead(
+                &agent,
+                "dmtrKovalenko/fff",
+                "v0.11.0",
+                "no-such-ref-grd-test"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn test_validate_repo_valid() {
         assert!(validate_repo("owner/repo").is_ok());
         assert!(validate_repo("lucidfrontier45/grd").is_ok());
@@ -418,7 +669,7 @@ mod tests {
         let cached_version = parse_tag_version("v2.2.7").unwrap();
         let page_one_url = "https://api.github.com/repos/owner/repo/releases?page=1";
         let page_two_url = "https://api.github.com/repos/owner/repo/releases?page=2";
-        let releases = collect_release_pages(Some(page_one_url.to_string()), |url| {
+        let releases = collect_release_pages(Some(page_one_url.to_string()), None, |url| {
             if url == page_one_url {
                 Ok((
                     vec![test_release("v2.2.8", false, false)],
@@ -439,6 +690,105 @@ mod tests {
         .unwrap();
         let selected = select_upgrade_release(releases, &cached_version).unwrap();
         assert_eq!(selected.tag_name, "v2.2.9");
+    }
+
+    #[test]
+    fn test_collect_release_pages_stops_once_stable_budget_is_reached() {
+        let page_one_url = "https://api.github.com/repos/owner/repo/releases?page=1";
+        let page_two_url = "https://api.github.com/repos/owner/repo/releases?page=2";
+        let page_three_url = "https://api.github.com/repos/owner/repo/releases?page=3";
+        let mut fetched = Vec::new();
+        let releases = collect_release_pages(Some(page_one_url.to_string()), Some(2), |url| {
+            fetched.push(url.to_string());
+            if url == page_one_url {
+                // Only one stable candidate on this page: prerelease and
+                // unparseable tags do not count toward the budget, so the
+                // walk must continue.
+                Ok((
+                    vec![
+                        test_release("1.2.0-nightly.1", true, false),
+                        test_release("nightly", false, false),
+                        test_release("v1.2.0", false, false),
+                    ],
+                    Some(page_two_url.to_string()),
+                ))
+            } else if url == page_two_url {
+                // Budget met after this page; page three must not be fetched
+                // even though GitHub advertises a link to it.
+                Ok((
+                    vec![test_release("v1.2.1", false, false)],
+                    Some(page_three_url.to_string()),
+                ))
+            } else {
+                panic!("unexpected page fetched: {url}");
+            }
+        })
+        .unwrap();
+        assert_eq!(fetched, vec![page_one_url, page_two_url]);
+        assert_eq!(releases.len(), 4);
+    }
+
+    #[test]
+    fn test_collect_release_pages_without_budget_walks_every_page() {
+        let page_one_url = "https://api.github.com/repos/owner/repo/releases?page=1";
+        let page_two_url = "https://api.github.com/repos/owner/repo/releases?page=2";
+        let mut fetched = Vec::new();
+        let releases = collect_release_pages(Some(page_one_url.to_string()), None, |url| {
+            fetched.push(url.to_string());
+            Ok((
+                vec![
+                    test_release("v1.0.0", false, false),
+                    test_release("v1.0.1-nightly.1", true, false),
+                ],
+                (url == page_one_url).then(|| page_two_url.to_string()),
+            ))
+        })
+        .unwrap();
+        assert_eq!(fetched, vec![page_one_url, page_two_url]);
+        assert_eq!(releases.len(), 4);
+    }
+
+    #[test]
+    fn test_check_hint_gatekeeps_owner_latest() {
+        let installed = parse_tag_version("v2.2.7").unwrap();
+        // Strictly newer same-family stable: needs the compare cross-check.
+        assert_eq!(
+            check_hint(&test_release("v2.3.0", false, false), &installed),
+            HintCheck::VerifyWithCompare
+        );
+        // Same version: the install is already there, nothing to verify.
+        assert_eq!(
+            check_hint(&test_release("v2.2.7", false, false), &installed),
+            HintCheck::Accept
+        );
+        // Older same-family stable.
+        assert_eq!(
+            check_hint(&test_release("v2.2.6", false, false), &installed),
+            HintCheck::Reject
+        );
+        // Prerelease or draft marker.
+        assert_eq!(
+            check_hint(&test_release("v2.2.8", true, false), &installed),
+            HintCheck::Reject
+        );
+        assert_eq!(
+            check_hint(&test_release("v2.2.8", false, true), &installed),
+            HintCheck::Reject
+        );
+        // Another tag family, even when newer.
+        assert_eq!(
+            check_hint(&test_release("2.2.8", false, false), &installed),
+            HintCheck::Reject
+        );
+        assert_eq!(
+            check_hint(&test_release("daemon-v2.2.8", false, false), &installed),
+            HintCheck::Reject
+        );
+        // Unparseable tag.
+        assert_eq!(
+            check_hint(&test_release("changelog", false, false), &installed),
+            HintCheck::Reject
+        );
     }
 
     #[test]
