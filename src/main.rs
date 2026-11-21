@@ -142,7 +142,7 @@ fn cmd_install_dir(action: &InstallDirAction) -> Result<()> {
 fn store_install_dir(cache: &mut state::State, path: &Path) -> Result<()> {
     cache
         .set_default_install_dir(path)
-        .with_context(|| format!("invalid install directory: {path:?}"))
+        .context("invalid install directory")
 }
 
 /// `grd config github_pat set <token>` / `grd config github_pat unset`:
@@ -335,7 +335,7 @@ fn resolve_dest(args: &Args, state: &state::State) -> Result<PathBuf> {
     };
     // The destination ends up in the state file, which holds UTF-8 only:
     // reject a path with non-UTF-8 bytes before touching the filesystem.
-    state::storable_path(&dest).with_context(|| format!("invalid destination: {dest:?}"))?;
+    state::storable_path(&dest).context("invalid destination")?;
     if !args.dry_run {
         fs::create_dir_all(&dest).context("Failed to create destination directory")?;
     }
