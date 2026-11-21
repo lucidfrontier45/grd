@@ -66,6 +66,8 @@ The result of matching assets against a target OS + arch:
 ## Version Cache
 Persistent state at `~/.grd/state.toml` keyed by `"owner/repo"`, recording the last-downloaded version to skip re-downloads.
 
+Paths kept in the cache (the install destination and the default install directory) must be valid UTF-8, because the cache is TOML. A path whose bytes are not valid UTF-8 is rejected at the boundary instead of being stored lossily — a lossy rendering (U+FFFD) would point later installs at a different directory.
+
 ## Extension Filter
 A default allowlist applied to asset names **before** OS/arch scoring, so non-binary artifacts (checksums, signatures, license files, manifests, package formats like `.dmg`/`.deb`/`.rpm`) never reach selection.
 

@@ -116,7 +116,7 @@ fn cmd_install_dir(action: &InstallDirAction) -> Result<()> {
     let mut cache = state::State::load();
     match action {
         InstallDirAction::Set { path } => {
-            cache.set_default_install_dir(&path.display().to_string());
+            store_install_dir(&mut cache, path)?;
             cache.save()?;
             println!("Default install directory set to: {}", path.display());
         }
@@ -131,6 +131,18 @@ fn cmd_install_dir(action: &InstallDirAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Record `path` as the default install directory.
+///
+/// The path must be valid UTF-8: the state file holds UTF-8 only, and a
+/// mangled path would send later installs to a different directory than the
+/// one that was registered. The path is rejected before anything is stored,
+/// so a failed call leaves the state untouched.
+fn store_install_dir(cache: &mut state::State, path: &Path) -> Result<()> {
+    cache
+        .set_default_install_dir(path)
+        .context("invalid install directory")
 }
 
 /// `grd config github_pat set <token>` / `grd config github_pat unset`:
@@ -321,6 +333,9 @@ fn resolve_dest(args: &Args, state: &state::State) -> Result<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(state::State::default_install_path),
     };
+    // The destination ends up in the state file, which holds UTF-8 only:
+    // reject a path with non-UTF-8 bytes before touching the filesystem.
+    state::storable_path(&dest).context("invalid destination")?;
     if !args.dry_run {
         fs::create_dir_all(&dest).context("Failed to create destination directory")?;
     }
@@ -490,13 +505,9 @@ fn install_release(
         download_and_extract(args, agent, dest, asset, platform, &lookup_name, &out_name)?;
 
     let mut cache = state::State::load();
-    cache.set_cached(
-        repo,
-        &asset.name,
-        &release.tag_name,
-        dest.display().to_string(),
-        &out_file,
-    );
+    cache
+        .set_cached(repo, &asset.name, &release.tag_name, dest, &out_file)
+        .context("failed to record the install in the state file")?;
     // The binary is already in place; still fail loudly so the user knows
     // this install will not be tracked (and so will re-download next time).
     cache
@@ -760,6 +771,65 @@ mod tests {
         assert_eq!(
             resolve_out_name(&args, "owner/prj", "asset.tar.gz", "linux"),
             "app"
+        );
+    }
+
+    #[test]
+    fn test_store_install_dir_stores_utf8_path() {
+        let mut cache = state::State::default();
+        store_install_dir(&mut cache, Path::new("/opt/bin")).unwrap();
+        assert_eq!(cache.get_default_install_dir(), Some("/opt/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_store_install_dir_rejects_non_utf8_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut cache = state::State::default();
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/d/b\xFFin"));
+        let err = store_install_dir(&mut cache, &bad).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("UTF-8"), "got: {msg}");
+        assert!(
+            cache.get_default_install_dir().is_none(),
+            "a rejected path must not be stored"
+        );
+    }
+
+    #[test]
+    fn test_resolve_dest_creates_the_destination() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp.path().join("bin");
+        let args = Args::parse_from(["grd", "owner/repo", "-d", dest.to_str().unwrap()]);
+
+        let resolved = resolve_dest(&args, &state::State::default()).unwrap();
+        assert_eq!(resolved, dest);
+        assert!(dest.is_dir(), "the destination must be created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_dest_rejects_non_utf8_destination() {
+        use std::{ffi::OsString, os::unix::ffi::OsStrExt};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dest = tmp
+            .path()
+            .join(OsString::from(std::ffi::OsStr::from_bytes(b"b\xFFin")));
+        let args = Args::parse_from([
+            OsString::from("grd"),
+            OsString::from("owner/repo"),
+            OsString::from("-d"),
+            dest.clone().into_os_string(),
+        ]);
+
+        let err = resolve_dest(&args, &state::State::default()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("UTF-8"), "got: {msg}");
+        assert!(
+            !dest.exists(),
+            "a rejected destination must not be created on disk"
         );
     }
 
