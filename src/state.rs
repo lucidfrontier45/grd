@@ -18,6 +18,23 @@ fn default_stable_scan_limit() -> usize {
     DEFAULT_STABLE_SCAN_LIMIT
 }
 
+/// Deserialize [`State::stable_scan_limit`] leniently. The state file is
+/// the settings file the docs invite users to hand-edit, so a typo such as
+/// `-1` or a non-integer must degrade to the default instead of failing
+/// the whole [`State`] load — a failed load starts from fresh state, and
+/// the next save would overwrite the stored PAT and install cache.
+/// Out-of-range and unparsable values both load as `0`, which
+/// [`State::get_stable_scan_limit`] maps to the default.
+fn deserialize_stable_scan_limit<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match i64::deserialize(deserializer) {
+        Ok(value) => Ok(usize::try_from(value).unwrap_or(0)),
+        Err(_) => Ok(0),
+    }
+}
+
 /// The path as it can be stored in the state file.
 ///
 /// The state file is TOML, so every value in it must be valid UTF-8, while
@@ -111,9 +128,13 @@ pub struct State {
     /// How many of the newest stable releases to walk when the owner-marked
     /// "Latest" release is not a usable upgrade hint; the release-list walk
     /// stops once this many stable candidates have been seen. Edit this key
-    /// in the state file to change it; values below 1 fall back to
-    /// [`DEFAULT_STABLE_SCAN_LIMIT`].
-    #[serde(default = "default_stable_scan_limit")]
+    /// in the state file to change it; invalid values (below 1, negative,
+    /// non-integer) load as [`DEFAULT_STABLE_SCAN_LIMIT`] instead of
+    /// corrupting the state file.
+    #[serde(
+        default = "default_stable_scan_limit",
+        deserialize_with = "deserialize_stable_scan_limit"
+    )]
     pub stable_scan_limit: usize,
 }
 
@@ -360,6 +381,37 @@ mod tests {
             State::load().get_stable_scan_limit(),
             DEFAULT_STABLE_SCAN_LIMIT
         );
+    }
+
+    #[test]
+    fn test_stable_scan_limit_invalid_values_do_not_wipe_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.toml");
+        let _env = StatePathEnvGuard::set(&state_path);
+
+        for content in [
+            "stable_scan_limit = -1\n",
+            "stable_scan_limit = 9223372036854775808\n", // beyond i64
+            "stable_scan_limit = \"twenty\"\n",
+        ] {
+            fs::write(&state_path, content).unwrap();
+            assert_eq!(
+                State::load().get_stable_scan_limit(),
+                DEFAULT_STABLE_SCAN_LIMIT,
+                "content: {content}"
+            );
+        }
+
+        // The decisive property: a bad value must not fail the State load,
+        // which would drop the stored PAT and install cache on the next save.
+        fs::write(
+            &state_path,
+            "github_pat = \"ghp_secret_token_value_0123\"\nstable_scan_limit = -1\n",
+        )
+        .unwrap();
+        let state = State::load();
+        assert_eq!(state.get_github_pat(), Some("ghp_secret_token_value_0123"));
+        assert_eq!(state.get_stable_scan_limit(), DEFAULT_STABLE_SCAN_LIMIT);
     }
 
     #[test]
